@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-CSV_PATH = PROJECT_ROOT / "data" / "food_master.csv"
+CSV_PATH = PROJECT_ROOT / "data" / "food_master_enriched.csv"
 
 load_dotenv(PROJECT_ROOT / ".env")
 

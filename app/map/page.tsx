@@ -66,6 +66,14 @@ type Restaurant = {
   recommendScore: number;
 };
 
+type RecommendedMenu = {
+  name: string;
+  family: string;
+  score: number;
+  anchor: string | null;
+  mmrScore: number | null;
+};
+
 type RestaurantResponse = {
   region: {
     area1: string;
@@ -76,6 +84,14 @@ type RestaurantResponse = {
 
   preferences: string[];
 
+  recommendationMode:
+    | "embedding"
+    | "category";
+
+  recommendedMenus: RecommendedMenu[];
+
+  searchMenus: string[];
+
   restaurants: Restaurant[];
 
   message?: string;
@@ -85,6 +101,18 @@ type Mode =
   | "recommend"
   | "value"
   | "preference";
+
+type PreferenceRadiusKm = 1 | 2 | 3 | 4 | 5;
+
+/*
+ * 음식점 API에서는 최대 5km까지 후보를 받아오고,
+ * 메뉴선호도 탭에서 사용자가 1~5km 범위를 선택하면
+ * 프론트에서 해당 반경 안의 음식점만 필터링합니다.
+ *
+ * 거리는 메뉴선호도 점수에는 섞지 않고
+ * 검색 범위 제한 용도로만 사용합니다.
+ */
+const MAX_RESTAURANT_SEARCH_RADIUS_KM = 5;
 
 /* =========================================================
    NAVER MAP 타입
@@ -240,6 +268,11 @@ export default function MapPage() {
   const [mode, setMode] =
     useState<Mode>("recommend");
 
+  const [
+    preferenceRadiusKm,
+    setPreferenceRadiusKm,
+  ] = useState<PreferenceRadiusKm>(3);
+
   const [mapLoaded, setMapLoaded] =
     useState(false);
 
@@ -260,6 +293,48 @@ export default function MapPage() {
 
   const [regionName, setRegionName] =
     useState("");
+
+  const [
+    recommendationMode,
+    setRecommendationMode,
+  ] = useState<
+    "embedding" | "category"
+  >("category");
+
+  const [
+    recommendedMenus,
+    setRecommendedMenus,
+  ] = useState<RecommendedMenu[]>(
+    []
+  );
+
+  const [
+    searchMenus,
+    setSearchMenus,
+  ] = useState<string[]>(
+    []
+  );
+
+  /*
+   * 현재 선택한 메뉴선호도 반경 안에 있는 음식점 수
+   *
+   * restaurants 선언 이후에 계산해야
+   * "Cannot access 'restaurants' before initialization"
+   * ReferenceError가 발생하지 않습니다.
+   */
+  const preferenceRestaurantCount =
+    useMemo(
+      () =>
+        restaurants.filter(
+          (restaurant) =>
+            restaurant.distance <=
+            preferenceRadiusKm * 1000
+        ).length,
+      [
+        restaurants,
+        preferenceRadiusKm,
+      ]
+    );
 
   /*
    * 현재 선택된 음식점
@@ -497,6 +572,10 @@ export default function MapPage() {
                 .longitude
             ),
 
+            radiusKm: String(
+              MAX_RESTAURANT_SEARCH_RADIUS_KM
+            ),
+
           });
 
         /*
@@ -525,14 +604,27 @@ export default function MapPage() {
         if (controller.signal.aborted) return;
         setRestaurantError(data.message ?? "");
         setRestaurants(
-          data.restaurants ??
-            []
+          data.restaurants ?? []
         );
 
         setRegionName(
           data.region
-            ?.displayName ??
-            ""
+            ?.displayName ??""
+        );
+
+        setRecommendationMode(
+          data.recommendationMode ??
+            "category"
+        );
+
+        setRecommendedMenus(
+          data.recommendedMenus ??
+            []
+        );
+
+        setSearchMenus(
+          data.searchMenus ??
+            []
         );
 
         /*
@@ -568,7 +660,7 @@ export default function MapPage() {
   }, [location]);
 
   /* =======================================================
-     5. MASK별 정렬
+     5. MASK별 정렬 / 메뉴선호도 반경 필터
   ======================================================= */
 
   const sortedRestaurants =
@@ -578,6 +670,10 @@ export default function MapPage() {
 
       /*
        * 추천
+       *
+       * 최종 추천 점수는 서버에서 계산합니다.
+       * 추후 가격 점수가 연결되면
+       * 가격 + 거리 + 메뉴선호도 기반으로 완성합니다.
        */
       if (
         mode ===
@@ -588,43 +684,51 @@ export default function MapPage() {
             b.recommendScore -
             a.recommendScore
         );
+
+        return result;
       }
 
       /*
        * 메뉴선호도
+       *
+       * 거리는 점수에 반영하지 않습니다.
+       * 선택한 1~5km 반경 안에 있는 음식점만 남긴 뒤
+       * preferenceScore만으로 정렬합니다.
        */
       if (
         mode ===
         "preference"
       ) {
-        result.sort(
-          (a, b) =>
-            b.preferenceScore -
-            a.preferenceScore
-        );
+        return result
+          .filter(
+            (restaurant) =>
+              restaurant.distance <=
+              preferenceRadiusKm * 1000
+          )
+          .sort(
+            (a, b) =>
+              b.preferenceScore -
+              a.preferenceScore
+          );
       }
 
       /*
        * 가성비
        *
        * 아직 가격 데이터 X
-       * → 가까운 순
+       * → 임시로 가까운 순
        */
-      if (
-        mode ===
-        "value"
-      ) {
-        result.sort(
-          (a, b) =>
-            a.distance -
-            b.distance
-        );
-      }
+      result.sort(
+        (a, b) =>
+          a.distance -
+          b.distance
+      );
 
       return result;
     }, [
       restaurants,
       mode,
+      preferenceRadiusKm,
     ]);
 
   /* =======================================================
@@ -640,14 +744,14 @@ export default function MapPage() {
       }
 
       return (
-        restaurants.find(
+        sortedRestaurants.find(
           (restaurant) =>
             restaurant.id ===
             selectedRestaurantId
         ) ?? null
       );
     }, [
-      restaurants,
+      sortedRestaurants,
       selectedRestaurantId,
     ]);
 
@@ -960,7 +1064,7 @@ export default function MapPage() {
     if (!location) return;
 
     if (
-      restaurants.length ===
+      sortedRestaurants.length ===
       0
     ) {
       return;
@@ -984,7 +1088,7 @@ export default function MapPage() {
         myPosition
       );
 
-    restaurants.forEach(
+    sortedRestaurants.forEach(
       (restaurant) => {
         const position =
           new window.naver!.maps.LatLng(
@@ -1002,7 +1106,7 @@ export default function MapPage() {
       bounds
     );
   }, [
-    restaurants,
+    sortedRestaurants,
     location,
     mapLoaded,
   ]);
@@ -1515,6 +1619,64 @@ export default function MapPage() {
       distance / 1000
     ).toFixed(1)}km`;
   }
+  function getMatchedRecommendedMenus(
+    restaurant: Restaurant
+  ) {
+    return restaurant
+      .matchedPreferences
+      .map((name) =>
+        recommendedMenus.find(
+          (menu) =>
+            menu.name === name
+        )
+      )
+      .filter(
+        (
+          menu
+        ): menu is RecommendedMenu =>
+          Boolean(menu)
+      );
+  }
+
+
+  function getRecommendationReason(
+    restaurant: Restaurant
+  ) {
+    if (
+      recommendationMode !==
+      "embedding"
+    ) {
+      return null;
+    }
+
+    const matched =
+      getMatchedRecommendedMenus(
+        restaurant
+      );
+
+    if (
+      matched.length === 0
+    ) {
+      return null;
+    }
+
+    const best = [...matched].sort(
+      (a, b) =>
+        b.score - a.score
+    )[0];
+
+    if (best.anchor) {
+      return (
+        `${best.anchor} 취향과 비슷한 ` +
+        `${best.name} 메뉴로 추천했어요`
+      );
+    }
+
+    return (
+      `${best.name} 메뉴 취향과 ` +
+      `잘 맞는 곳이에요`
+    );
+  }
 
   /* =======================================================
      MASK 설명
@@ -1525,14 +1687,14 @@ export default function MapPage() {
       mode ===
       "recommend"
     ) {
-      return "내 메뉴 취향과 거리를 함께 반영했어요";
+      return "가격 데이터 연결 전이라 현재는 메뉴 취향과 거리를 함께 반영해요";
     }
 
     if (
       mode ===
       "preference"
     ) {
-      return "내가 선택한 메뉴와 잘 맞는 곳부터 보여줘요";
+      return `반경 ${preferenceRadiusKm}km 안에서 거리 점수 없이 메뉴 취향 순으로 보여줘요`;
     }
 
     return "가격 데이터 연결 전이라 현재는 가까운 곳부터 보여줘요";
@@ -1695,6 +1857,78 @@ export default function MapPage() {
 
             </div>
 
+            {mode === "preference" && (
+              <div className="mt-3 rounded-2xl border border-orange-100 bg-orange-50/60 p-4">
+
+                <div className="flex items-start justify-between gap-3">
+
+                  <div>
+                    <p className="text-xs font-bold text-gray-800">
+                      메뉴선호도 검색 범위
+                    </p>
+
+                    <p className="mt-1 text-[11px] leading-4 text-gray-500">
+                      거리는 순위에 반영하지 않고 범위 제한에만 사용해요.
+                    </p>
+                  </div>
+
+                  <div className="shrink-0 rounded-full bg-orange-500 px-3 py-1.5 text-xs font-bold text-white shadow-sm">
+                    {preferenceRadiusKm}km · {preferenceRestaurantCount}곳
+                  </div>
+
+                </div>
+
+                <div className="mt-4">
+
+                  <input
+                    type="range"
+                    min={1}
+                    max={5}
+                    step={1}
+                    value={preferenceRadiusKm}
+                    onChange={(event) => {
+                      const nextRadius =
+                        Number(
+                          event.target.value
+                        ) as PreferenceRadiusKm;
+
+                      setPreferenceRadiusKm(
+                        nextRadius
+                      );
+
+                      setSelectedRestaurantId(
+                        null
+                      );
+                    }}
+                    aria-label="메뉴선호도 검색 반경"
+                    className="w-full cursor-pointer accent-orange-500"
+                  />
+
+                  <div className="mt-1 flex justify-between px-0.5 text-[10px] font-semibold text-gray-400">
+                    {[1, 2, 3, 4, 5].map(
+                      (radius) => (
+                        <span
+                          key={
+                            radius
+                          }
+                          className={
+                            preferenceRadiusKm ===
+                            radius
+                              ? "text-orange-500"
+                              : ""
+                          }
+                        >
+                          {radius}km
+                        </span>
+                      )
+                    )}
+                  </div>
+
+                </div>
+
+              </div>
+            )}
+
           </div>
 
           {/* =================================================
@@ -1800,25 +2034,26 @@ export default function MapPage() {
                       )}
                     </span>
 
-                    {selectedRestaurant
-                      .matchedPreferences
-                      .slice(0, 2)
-                      .map(
-                        (
-                          preference
-                        ) => (
-                          <span
-                            key={
-                              preference
-                            }
-                            className="rounded-full bg-orange-50 px-2.5 py-1 text-xs text-orange-600"
-                          >
-                            {
-                              preference
-                            }
-                          </span>
-                        )
-                      )}
+                    {mode === "preference" &&
+                      selectedRestaurant
+                        .matchedPreferences
+                        .slice(0, 2)
+                        .map(
+                          (
+                            preference
+                          ) => (
+                            <span
+                              key={
+                                preference
+                              }
+                              className="rounded-full bg-orange-50 px-2.5 py-1 text-xs text-orange-600"
+                            >
+                              {
+                                preference
+                              }
+                            </span>
+                          )
+                        )}
 
                   </div>
 
@@ -1943,20 +2178,63 @@ export default function MapPage() {
               {description}
             </p>
 
-            <div className="mt-1 flex items-end justify-between">
+            {mode === "preference" &&
+              recommendationMode === "embedding" &&
+              searchMenus.length > 0 && (
+                <div className="mt-4 rounded-3xl border border-orange-100 bg-gradient-to-br from-orange-50 to-white p-4">
+
+                  <div className="flex items-center justify-between gap-3">
+
+                    <div>
+                      <p className="text-xs font-bold text-orange-500">
+                        ✨ AI 메뉴 취향 분석
+                      </p>
+
+                      <h3 className="mt-1 font-bold text-gray-900">
+                        내가 좋아할 만한 메뉴
+                      </h3>
+                    </div>
+
+                    <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-orange-500 shadow-sm">
+                      반경 {preferenceRadiusKm}km
+                    </span>
+
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+
+                    {searchMenus.map((menu) => (
+                      <span
+                        key={menu}
+                        className="rounded-full border border-orange-100 bg-white px-3 py-1.5 text-xs font-semibold text-orange-600"
+                      >
+                        🍽️ {menu}
+                      </span>
+                    ))}
+
+                  </div>
+
+                  <p className="mt-3 text-[11px] leading-5 text-gray-400">
+                    거리 점수는 섞지 않고, 선택한 반경 안에서 메뉴 취향이 잘 맞는 곳을 찾아요.
+                  </p>
+
+                </div>
+              )}
+
+            <div className="mt-4 flex items-end justify-between">
 
               <h2 className="text-xl font-bold text-gray-900">
-                근처 추천 맛집
+                {mode === "preference"
+                  ? "메뉴 취향 맛집"
+                  : mode === "value"
+                    ? "가성비 맛집"
+                    : "근처 추천 맛집"}
               </h2>
 
               {!restaurantLoading &&
-                restaurants.length >
-                  0 && (
+                sortedRestaurants.length > 0 && (
                   <span className="text-xs text-gray-400">
-                    {
-                      restaurants.length
-                    }
-                    곳
+                    {sortedRestaurants.length}곳
                   </span>
                 )}
 
@@ -2016,6 +2294,15 @@ export default function MapPage() {
                   const selected =
                     restaurant.id ===
                     selectedRestaurantId;
+                  const recommendationReason =
+                    getRecommendationReason(
+                      restaurant
+                    );
+
+                  const matchedAiMenus =
+                    getMatchedRecommendedMenus(
+                      restaurant
+                    );
 
                   return (
                     <article
@@ -2104,24 +2391,86 @@ export default function MapPage() {
                               )}
                             </span>
 
-                            {restaurant.matchedPreferences.map(
-                              (
-                                preference
-                              ) => (
-                                <span
-                                  key={
-                                    preference
-                                  }
-                                  className="rounded-full bg-orange-50 px-2.5 py-1 text-xs text-orange-600"
-                                >
-                                  {
-                                    preference
-                                  }
-                                </span>
-                              )
-                            )}
+                            {mode === "preference" &&
+                              restaurant.matchedPreferences.map(
+                                (
+                                  preference
+                                ) => (
+                                  <span
+                                    key={
+                                      preference
+                                    }
+                                    className="rounded-full bg-orange-50 px-2.5 py-1 text-xs text-orange-600"
+                                  >
+                                    {
+                                      preference
+                                    }
+                                  </span>
+                                )
+                              )}
 
                           </div>
+                          {/* 메뉴선호도 전용 AI 추천 정보 */}
+
+                          {mode === "preference" &&
+                            recommendationMode === "embedding" && (
+                              <div className="mt-3 rounded-2xl bg-orange-50/70 p-3">
+
+                                <div className="flex items-center justify-between gap-3">
+
+                                  <p className="text-xs font-bold text-orange-700">
+                                    ✨ 메뉴 취향 추천
+                                  </p>
+
+                                  <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-orange-600 shadow-sm">
+                                    메뉴선호도 {restaurant.preferenceScore}
+                                  </span>
+
+                                </div>
+
+                                {recommendationReason && (
+                                  <p className="mt-2 text-xs leading-5 text-gray-600">
+                                    {recommendationReason}
+                                  </p>
+                                )}
+
+                                {matchedAiMenus.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+
+                                    {matchedAiMenus
+                                      .slice(0, 3)
+                                      .map((menu) => (
+                                        <span
+                                          key={menu.name}
+                                          className="rounded-full border border-orange-100 bg-white px-2.5 py-1 text-[11px] font-semibold text-orange-600"
+                                        >
+                                          🍽️ {menu.name}
+                                        </span>
+                                      ))}
+
+                                  </div>
+                                )}
+
+                                <div className="mt-3 flex items-center justify-between rounded-xl bg-white px-3 py-2">
+                                  <div>
+                                    <p className="text-[10px] text-gray-400">
+                                      메뉴선호도
+                                    </p>
+
+                                    <p className="mt-0.5 text-sm font-bold text-orange-500">
+                                      {restaurant.preferenceScore}
+                                    </p>
+                                  </div>
+
+                                  <p className="text-right text-[11px] leading-5 text-gray-400">
+                                    거리는 {formatDistance(restaurant.distance)}로 표시만 하고
+                                    <br />
+                                    메뉴선호도 점수에는 반영하지 않아요.
+                                  </p>
+                                </div>
+
+                              </div>
+                            )}
 
                           {/* 주소 */}
 
