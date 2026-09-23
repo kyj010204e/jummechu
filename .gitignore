@@ -39,3 +39,27 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# user-uploaded profile images
+/uploads/
+/public/uploads/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Prisma generated client
+/generated/prisma/
+
+# AIHub / large raw data
+*.zip
+/data/raw/
+
+# IDE / local tool settings
+/.idea/
+/.cursor/
+/.claude/
+/.devin/
+/.agents/

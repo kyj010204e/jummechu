@@ -1,0 +1,4 @@
+name,cuisine_type,food_type,main_ingredients,sub_ingredients,seasonings,taste_tags,cooking_methods,staple_types,aliases,description,source,source_code
+제육볶음,한식,고기,돼지고기,양파,고추장,매콤|짭짤,볶음,밥,제육|직화제육|제육정식,돼지고기를 고추장 양념에 볶은 음식,manual,
+김치찌개,한식,찌개,김치,돼지고기|두부,,매콤|짭짤,끓임,밥,김치찌게,김치를 중심으로 끓인 찌개,manual,
+돈까스,일식,고기,돼지고기,빵가루,,고소|바삭,튀김,밥,돈가스|포크커틀릿,돼지고기에 빵가루를 입혀 튀긴 음식,manual,
