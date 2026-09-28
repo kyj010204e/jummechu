@@ -47,6 +47,30 @@ type SavedLocation = {
   latitude: number;
   longitude: number;
 };
+type BusinessStatus =
+  | "OPEN"
+  | "BREAK"
+  | "CLOSED"
+  | "CLOSED_TODAY"
+  | "UNKNOWN";
+
+type BusinessHoursInfo = {
+  status: BusinessStatus;
+  label: string;
+  detail: string | null;
+
+  todayOpen: string | null;
+  todayClose: string | null;
+
+  breakStart: string | null;
+  breakEnd: string | null;
+
+  nextOpenText: string | null;
+
+  source: string | null;
+  verifiedAt: string | null;
+};
+
 type Restaurant = {
   id: string;
   name: string;
@@ -61,9 +85,46 @@ type Restaurant = {
 
   matchedPreferences: string[];
 
+  recommendedMenuName:
+    string | null;
+
+  recommendedMenuScore:
+    number | null;
+
   preferenceScore: number;
   distanceScore: number;
   recommendScore: number;
+
+  priceMenuName: string | null;
+
+  priceKrw: number | null;
+
+  directPriceKrw: number | null;
+
+  regionalAveragePriceKrw:
+    number | null;
+
+  restaurantMenuPriceId:
+    string | null;
+
+  priceSource:
+    | "direct"
+    | "regional"
+    | "unknown";
+
+  priceSourceLabel: string;
+
+  priceScore: number;
+
+  valueScore: number;
+
+  priceComparedToRegionalPercent:
+    number | null;
+
+  priceComparable: boolean;
+
+  businessHours: BusinessHoursInfo;
+  recommendationEligible: boolean;
 };
 
 type RecommendedMenu = {
@@ -315,6 +376,66 @@ export default function MapPage() {
     []
   );
 
+  const [
+    restaurantRefreshKey,
+    setRestaurantRefreshKey,
+  ] = useState(0);
+
+  const [
+    businessHoursRestaurant,
+    setBusinessHoursRestaurant,
+  ] = useState<Restaurant | null>(null);
+
+  const [
+    showBusinessHoursModal,
+    setShowBusinessHoursModal,
+  ] = useState(false);
+
+  const [
+    businessHoursDay,
+    setBusinessHoursDay,
+  ] = useState(0);
+
+  const [
+    businessHoursOpen,
+    setBusinessHoursOpen,
+  ] = useState("11:00");
+
+  const [
+    businessHoursClose,
+    setBusinessHoursClose,
+  ] = useState("21:00");
+
+  const [
+    businessHoursBreakStart,
+    setBusinessHoursBreakStart,
+  ] = useState("");
+
+  const [
+    businessHoursBreakEnd,
+    setBusinessHoursBreakEnd,
+  ] = useState("");
+
+  const [
+    businessHoursClosed,
+    setBusinessHoursClosed,
+  ] = useState(false);
+
+  const [
+    businessHoursApplyAllDays,
+    setBusinessHoursApplyAllDays,
+  ] = useState(false);
+
+  const [
+    businessHoursSaving,
+    setBusinessHoursSaving,
+  ] = useState(false);
+
+  const [
+    businessHoursError,
+    setBusinessHoursError,
+  ] = useState("");
+
   /*
    * 현재 선택한 메뉴선호도 반경 안에 있는 음식점 수
    *
@@ -327,8 +448,9 @@ export default function MapPage() {
       () =>
         restaurants.filter(
           (restaurant) =>
+            restaurant.recommendationEligible &&
             restaurant.distance <=
-            preferenceRadiusKm * 1000
+              preferenceRadiusKm * 1000
         ).length,
       [
         restaurants,
@@ -657,7 +779,10 @@ export default function MapPage() {
 
     loadRestaurants();
     return () => controller.abort();
-  }, [location]);
+  }, [
+    location,
+    restaurantRefreshKey,
+  ]);
 
   /* =======================================================
      5. MASK별 정렬 / 메뉴선호도 반경 필터
@@ -666,7 +791,10 @@ export default function MapPage() {
   const sortedRestaurants =
     useMemo(() => {
       const result =
-        [...restaurants];
+        restaurants.filter(
+          (restaurant) =>
+            restaurant.recommendationEligible
+        );
 
       /*
        * 추천
@@ -715,13 +843,17 @@ export default function MapPage() {
       /*
        * 가성비
        *
-       * 아직 가격 데이터 X
-       * → 임시로 가까운 순
+       * 메뉴 취향 60%
+       * +
+       * 가격 점수 40%
+       *
+       * 실제 가게 가격과 지역 평균 비교자료가 없는 경우
+       * 가격점수는 중립값으로 처리됩니다.
        */
       result.sort(
         (a, b) =>
-          a.distance -
-          b.distance
+          b.valueScore -
+          a.valueScore
       );
 
       return result;
@@ -730,6 +862,24 @@ export default function MapPage() {
       mode,
       preferenceRadiusKm,
     ]);
+
+  const closedRestaurants =
+    useMemo(
+      () =>
+        restaurants
+          .filter(
+            (restaurant) =>
+              !restaurant.recommendationEligible &&
+              restaurant.businessHours.status !==
+                "UNKNOWN"
+          )
+          .sort(
+            (a, b) =>
+              a.distance -
+              b.distance
+          ),
+      [restaurants]
+    );
 
   /* =======================================================
      선택된 음식점
@@ -773,7 +923,7 @@ export default function MapPage() {
       "value"
     ) {
       return restaurant
-        .distanceScore;
+        .valueScore;
     }
 
     return restaurant
@@ -1678,6 +1828,489 @@ export default function MapPage() {
     );
   }
 
+  const BUSINESS_DAY_NAMES = [
+    "일",
+    "월",
+    "화",
+    "수",
+    "목",
+    "금",
+    "토",
+  ];
+
+  function getKoreaDayOfWeek() {
+    const weekday =
+      new Intl.DateTimeFormat(
+        "en-US",
+        {
+          timeZone:
+            "Asia/Seoul",
+
+          weekday:
+            "short",
+        }
+      ).format(
+        new Date()
+      );
+
+    const dayMap:
+      Record<string, number> = {
+        Sun: 0,
+        Mon: 1,
+        Tue: 2,
+        Wed: 3,
+        Thu: 4,
+        Fri: 5,
+        Sat: 6,
+      };
+
+    return dayMap[
+      weekday
+    ] ?? 0;
+  }
+
+  function openBusinessHoursEditor(
+    restaurant: Restaurant
+  ) {
+    const hours =
+      restaurant.businessHours;
+
+    setBusinessHoursRestaurant(
+      restaurant
+    );
+
+    setBusinessHoursDay(
+      getKoreaDayOfWeek()
+    );
+
+    setBusinessHoursOpen(
+      hours.todayOpen ??
+        "11:00"
+    );
+
+    setBusinessHoursClose(
+      hours.todayClose ??
+        "21:00"
+    );
+
+    setBusinessHoursBreakStart(
+      hours.breakStart ?? ""
+    );
+
+    setBusinessHoursBreakEnd(
+      hours.breakEnd ?? ""
+    );
+
+    setBusinessHoursClosed(
+      hours.status ===
+        "CLOSED_TODAY"
+    );
+
+    setBusinessHoursApplyAllDays(
+      false
+    );
+
+    setBusinessHoursError(
+      ""
+    );
+
+    setShowBusinessHoursModal(
+      true
+    );
+  }
+
+  function closeBusinessHoursEditor() {
+    if (
+      businessHoursSaving
+    ) {
+      return;
+    }
+
+    setShowBusinessHoursModal(
+      false
+    );
+
+    setBusinessHoursRestaurant(
+      null
+    );
+
+    setBusinessHoursError(
+      ""
+    );
+  }
+
+  async function saveBusinessHours() {
+    if (
+      !businessHoursRestaurant ||
+      businessHoursSaving
+    ) {
+      return;
+    }
+
+    if (
+      !businessHoursClosed &&
+      (
+        !businessHoursOpen ||
+        !businessHoursClose
+      )
+    ) {
+      setBusinessHoursError(
+        "영업 시작/종료 시간을 입력해주세요."
+      );
+
+      return;
+    }
+
+    if (
+      Boolean(
+        businessHoursBreakStart
+      ) !==
+      Boolean(
+        businessHoursBreakEnd
+      )
+    ) {
+      setBusinessHoursError(
+        "브레이크타임 시작/종료 시간을 모두 입력해주세요."
+      );
+
+      return;
+    }
+
+    try {
+      setBusinessHoursSaving(
+        true
+      );
+
+      setBusinessHoursError(
+        ""
+      );
+
+      const response =
+        await fetch(
+          "/api/business-hours",
+          {
+            method:
+              "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                restaurantKey:
+                  businessHoursRestaurant.id,
+
+                restaurantName:
+                  businessHoursRestaurant.name,
+
+                roadAddress:
+                  businessHoursRestaurant
+                    .roadAddress ||
+                  businessHoursRestaurant
+                    .address,
+
+                dayOfWeek:
+                  businessHoursDay,
+
+                openTime:
+                  businessHoursClosed
+                    ? null
+                    : businessHoursOpen,
+
+                closeTime:
+                  businessHoursClosed
+                    ? null
+                    : businessHoursClose,
+
+                breakStartTime:
+                  businessHoursClosed ||
+                  !businessHoursBreakStart
+                    ? null
+                    : businessHoursBreakStart,
+
+                breakEndTime:
+                  businessHoursClosed ||
+                  !businessHoursBreakEnd
+                    ? null
+                    : businessHoursBreakEnd,
+
+                isClosed:
+                  businessHoursClosed,
+
+                applyAllDays:
+                  businessHoursApplyAllDays,
+
+                sourceUrl:
+                  getNaverMapLink(
+                    businessHoursRestaurant
+                  ),
+              }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (
+        response.status ===
+        401
+      ) {
+        router.replace(
+          "/login"
+        );
+
+        return;
+      }
+
+      if (
+        !response.ok
+      ) {
+        throw new Error(
+          data.message ??
+            "영업시간 저장에 실패했습니다."
+        );
+      }
+
+      setShowBusinessHoursModal(
+        false
+      );
+
+      setBusinessHoursRestaurant(
+        null
+      );
+
+      setRestaurantRefreshKey(
+        (current) =>
+          current + 1
+      );
+
+    } catch (error) {
+      setBusinessHoursError(
+        error instanceof Error
+          ? error.message
+          : "영업시간 저장에 실패했습니다."
+      );
+
+    } finally {
+      setBusinessHoursSaving(
+        false
+      );
+    }
+  }
+
+
+  function formatPriceKrw(
+    price:
+      number | null
+  ) {
+
+    if (
+      price === null
+    ) {
+      return "가격 정보 없음";
+    }
+
+
+    return `${price.toLocaleString("ko-KR")}원`;
+  }
+
+
+  function getRecommendedMenuLabel(
+    restaurant: Restaurant
+  ) {
+
+    return (
+      restaurant
+        .recommendedMenuName ??
+      restaurant
+        .matchedPreferences[0] ??
+      "추천 메뉴 준비 중"
+    );
+  }
+
+
+  function getPriceSummary(
+    restaurant: Restaurant
+  ) {
+
+    if (
+      restaurant.priceSource ===
+        "direct" &&
+      restaurant.priceKrw !==
+        null
+    ) {
+
+      return {
+        text:
+          formatPriceKrw(
+            restaurant.priceKrw
+          ),
+
+        subtext:
+          "추천 메뉴의 확인된 가격",
+      };
+    }
+
+
+    if (
+      restaurant.priceSource ===
+        "regional" &&
+      restaurant.priceKrw !==
+        null
+    ) {
+
+      return {
+        text:
+          `약 ${formatPriceKrw(
+            restaurant.priceKrw
+          )}`,
+
+        subtext:
+          "추천 메뉴의 지역 평균 기준",
+      };
+    }
+
+
+    return {
+      text:
+        "가격 정보 없음",
+
+      subtext:
+        "가격 제보가 아직 없어요",
+    };
+  }
+
+
+  function getPriceComparisonText(
+    restaurant: Restaurant
+  ) {
+
+    const difference =
+      restaurant
+        .priceComparedToRegionalPercent;
+
+
+    if (
+      difference ===
+      null
+    ) {
+
+      return null;
+    }
+
+
+    if (
+      difference <=
+      -5
+    ) {
+
+      return `지역 평균보다 ${Math.abs(
+        difference
+      )}% 저렴`;
+    }
+
+
+    if (
+      difference >=
+      5
+    ) {
+
+      return `지역 평균보다 ${difference}% 높음`;
+    }
+
+
+    return "지역 평균 수준";
+  }
+
+
+  function getBusinessStatusClasses(
+    restaurant: Restaurant
+  ) {
+    switch (
+      restaurant.businessHours.status
+    ) {
+      case "OPEN":
+        return {
+          dot: "bg-emerald-500",
+          text: "text-emerald-600",
+          box: "bg-emerald-50 border-emerald-100",
+        };
+
+      case "BREAK":
+        return {
+          dot: "bg-amber-500",
+          text: "text-amber-600",
+          box: "bg-amber-50 border-amber-100",
+        };
+
+      case "CLOSED":
+      case "CLOSED_TODAY":
+        return {
+          dot: "bg-red-500",
+          text: "text-red-600",
+          box: "bg-red-50 border-red-100",
+        };
+
+      default:
+        return {
+          dot: "bg-gray-400",
+          text: "text-gray-500",
+          box: "bg-gray-50 border-gray-100",
+        };
+    }
+  }
+
+  function renderBusinessStatus(
+    restaurant: Restaurant,
+    compact = false
+  ) {
+    const styles =
+      getBusinessStatusClasses(
+        restaurant
+      );
+
+    const hours =
+      restaurant.businessHours;
+
+    return (
+      <div
+        className={`inline-flex ${
+          compact
+            ? "items-center gap-1.5"
+            : "items-start gap-2 rounded-xl border px-3 py-2"
+        } ${compact ? "" : styles.box}`}
+      >
+        <span
+          className={`mt-[5px] h-2 w-2 shrink-0 rounded-full ${styles.dot}`}
+        />
+
+        <div className="min-w-0">
+          <p
+            className={`text-xs font-bold ${styles.text}`}
+          >
+            {hours.label}
+          </p>
+
+          {!compact &&
+            hours.detail && (
+              <p className="mt-0.5 text-[11px] text-gray-500">
+                {hours.detail}
+              </p>
+            )}
+
+          {!compact &&
+            hours.nextOpenText && (
+              <p className="mt-0.5 text-[11px] font-semibold text-gray-500">
+                {hours.nextOpenText}
+              </p>
+            )}
+        </div>
+      </div>
+    );
+  }
+
   /* =======================================================
      MASK 설명
   ======================================================= */
@@ -1687,7 +2320,7 @@ export default function MapPage() {
       mode ===
       "recommend"
     ) {
-      return "가격 데이터 연결 전이라 현재는 메뉴 취향과 거리를 함께 반영해요";
+      return "메뉴 취향을 중심으로, 검증된 가격 비교가 있으면 가격과 거리까지 함께 반영해요";
     }
 
     if (
@@ -1697,7 +2330,7 @@ export default function MapPage() {
       return `반경 ${preferenceRadiusKm}km 안에서 거리 점수 없이 메뉴 취향 순으로 보여줘요`;
     }
 
-    return "가격 데이터 연결 전이라 현재는 가까운 곳부터 보여줘요";
+    return "메뉴 취향 60% + 가격 40%로 가성비가 좋은 곳부터 보여줘요";
   })();
 
   /* =======================================================
@@ -2021,6 +2654,76 @@ export default function MapPage() {
                       {getRestaurantScore(
                         selectedRestaurant
                       )}
+                    </div>
+
+                  </div>
+
+                  <div className="mt-2">
+                    {renderBusinessStatus(
+                      selectedRestaurant
+                    )}
+                  </div>
+
+                  <div className="mt-2 rounded-xl bg-orange-50 px-3 py-3">
+
+                    <p className="text-[11px] font-bold text-orange-500">
+                      AI 추천 메뉴
+                    </p>
+
+                    <div className="mt-1 flex items-center justify-between gap-3">
+
+                      <p className="truncate text-sm font-extrabold text-gray-900">
+                        🍽️ {
+                          getRecommendedMenuLabel(
+                            selectedRestaurant
+                          )
+                        }
+                      </p>
+
+                      {selectedRestaurant.recommendedMenuScore !==
+                        null && (
+                        <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-orange-500">
+                          메뉴 {Math.round(
+                            selectedRestaurant.recommendedMenuScore
+                          )}
+                        </span>
+                      )}
+
+                    </div>
+
+                  </div>
+
+
+                  <div className="mt-2 rounded-xl bg-emerald-50/70 px-3 py-2">
+
+                    <div className="flex items-center justify-between gap-3">
+
+                      <div className="min-w-0">
+
+                        <p className="text-xs font-bold text-emerald-700">
+                          💰 {
+                            getPriceSummary(
+                              selectedRestaurant
+                            ).text
+                          }
+                        </p>
+
+                        <p className="mt-0.5 truncate text-[11px] text-emerald-700/70">
+                          {
+                            getPriceSummary(
+                              selectedRestaurant
+                            ).subtext
+                          }
+                        </p>
+
+                      </div>
+
+                      {selectedRestaurant.priceComparable && (
+                        <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-emerald-600">
+                          가격 {selectedRestaurant.priceScore}
+                        </span>
+                      )}
+
                     </div>
 
                   </div>
@@ -2364,6 +3067,29 @@ export default function MapPage() {
                                 }
                               </p>
 
+                              <div className="mt-2">
+                                {renderBusinessStatus(
+                                  restaurant,
+                                  true
+                                )}
+                              </div>
+
+                              <div className="mt-2 flex items-center gap-2">
+
+                                <span className="rounded-full bg-orange-50 px-2.5 py-1 text-[11px] font-bold text-orange-600">
+                                  🍽️ 추천
+                                </span>
+
+                                <span className="truncate text-xs font-bold text-gray-700">
+                                  {
+                                    getRecommendedMenuLabel(
+                                      restaurant
+                                    )
+                                  }
+                                </span>
+
+                              </div>
+
                             </div>
 
                             <div
@@ -2391,6 +3117,25 @@ export default function MapPage() {
                               )}
                             </span>
 
+                            <span
+                              className={`rounded-full px-2.5 py-1 text-xs ${
+                                restaurant.priceSource ===
+                                  "unknown"
+                                  ? "bg-gray-100 text-gray-400"
+                                  : restaurant.priceSource ===
+                                      "direct"
+                                    ? "bg-emerald-50 font-semibold text-emerald-700"
+                                    : "bg-blue-50 text-blue-600"
+                              }`}
+                            >
+                              💰{" "}
+                              {
+                                getPriceSummary(
+                                  restaurant
+                                ).text
+                              }
+                            </span>
+
                             {mode === "preference" &&
                               restaurant.matchedPreferences.map(
                                 (
@@ -2410,6 +3155,90 @@ export default function MapPage() {
                               )}
 
                           </div>
+                          {/* 가성비 전용 가격 분석 */}
+
+                          {mode === "value" && (
+                            <div className="mt-3 rounded-2xl bg-emerald-50/70 p-3">
+
+                              <div className="flex items-center justify-between gap-3">
+
+                                <p className="text-xs font-bold text-emerald-700">
+                                  💰 가성비 분석
+                                </p>
+
+                                <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-emerald-600 shadow-sm">
+                                  가성비 {restaurant.valueScore}
+                                </span>
+
+                              </div>
+
+
+                              <div className="mt-2">
+
+                                <p className="text-xs font-bold text-orange-500">
+                                  🍽️ {
+                                    getRecommendedMenuLabel(
+                                      restaurant
+                                    )
+                                  }
+                                </p>
+
+                                <p className="mt-1 text-sm font-bold text-gray-800">
+                                  {
+                                    getPriceSummary(
+                                      restaurant
+                                    ).text
+                                  }
+                                </p>
+
+                                <p className="mt-1 text-xs text-gray-500">
+                                  {
+                                    getPriceSummary(
+                                      restaurant
+                                    ).subtext
+                                  }
+                                </p>
+
+                              </div>
+
+
+                              {restaurant.priceComparable &&
+                                restaurant.regionalAveragePriceKrw !==
+                                  null && (
+                                  <div className="mt-3 flex flex-wrap gap-2">
+
+                                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-600">
+                                      지역 평균{" "}
+                                      {formatPriceKrw(
+                                        restaurant.regionalAveragePriceKrw
+                                      )}
+                                    </span>
+
+                                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-emerald-600">
+                                      {
+                                        getPriceComparisonText(
+                                          restaurant
+                                        )
+                                      }
+                                    </span>
+
+                                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-500">
+                                      가격점수 {restaurant.priceScore}
+                                    </span>
+
+                                  </div>
+                                )}
+
+
+                              {!restaurant.priceComparable && (
+                                <p className="mt-2 text-[11px] leading-5 text-gray-400">
+                                  이 추천 메뉴의 실제 가격과 지역 평균이 쌓이면 가성비 점수가 더 정확해져요.
+                                </p>
+                              )}
+
+                            </div>
+                          )}
+
                           {/* 메뉴선호도 전용 AI 추천 정보 */}
 
                           {mode === "preference" &&
@@ -2481,20 +3310,41 @@ export default function MapPage() {
 
                           {/* 링크 */}
 
-                          <a
-                            href={getNaverMapLink(
-                              restaurant
-                            )}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                            }}
-                            className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-green-600 hover:underline"
-                          >
-                            네이버 지도에서 보기
-                            <span>→</span>
-                          </a>
+                          <div className="mt-3 flex flex-wrap items-center gap-3">
+
+                            <a
+                              href={getNaverMapLink(
+                                restaurant
+                              )}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                              }}
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-green-600 hover:underline"
+                            >
+                              네이버 지도에서 보기
+                              <span>→</span>
+                            </a>
+
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+
+                                openBusinessHoursEditor(
+                                  restaurant
+                                );
+                              }}
+                              className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
+                            >
+                              {restaurant.businessHours.status ===
+                              "UNKNOWN"
+                                ? "영업시간 등록"
+                                : "영업시간 수정"}
+                            </button>
+
+                          </div>
 
                         </div>
 
@@ -2506,6 +3356,102 @@ export default function MapPage() {
               )}
 
             </div>
+
+            {!restaurantLoading &&
+              closedRestaurants.length > 0 && (
+                <div className="mt-8 border-t border-gray-100 pt-6">
+
+                  <div className="flex items-end justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-bold text-gray-400">
+                        추천에서 제외됨
+                      </p>
+
+                      <h3 className="mt-1 text-base font-bold text-gray-800">
+                        현재 영업중이 아닌 가게
+                      </h3>
+                    </div>
+
+                    <span className="text-xs text-gray-400">
+                      {closedRestaurants.length}곳
+                    </span>
+                  </div>
+
+                  <p className="mt-1 text-xs leading-5 text-gray-400">
+                    영업종료, 브레이크타임, 오늘 휴무인 가게는 추천 순위와 지도 마커에서 제외했어요.
+                  </p>
+
+                  <div className="mt-3 space-y-2">
+                    {closedRestaurants.map(
+                      (restaurant) => {
+                        const styles =
+                          getBusinessStatusClasses(
+                            restaurant
+                          );
+
+                        return (
+                          <article
+                            key={`closed-${restaurant.id}`}
+                            className={`rounded-2xl border p-4 ${styles.box}`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <h4 className="truncate text-sm font-bold text-gray-800">
+                                  {restaurant.name}
+                                </h4>
+
+                                <p className="mt-1 line-clamp-1 text-[11px] text-gray-500">
+                                  {restaurant.category}
+                                </p>
+                              </div>
+
+                              <span className="shrink-0 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-gray-500">
+                                {formatDistance(
+                                  restaurant.distance
+                                )}
+                              </span>
+                            </div>
+
+                            <div className="mt-3">
+                              {renderBusinessStatus(
+                                restaurant
+                              )}
+                            </div>
+
+                            <div className="mt-3 flex flex-wrap items-center gap-3">
+
+                              <a
+                                href={getNaverMapLink(
+                                  restaurant
+                                )}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-xs font-semibold text-green-600 hover:underline"
+                              >
+                                네이버 지도에서 보기
+                                <span>→</span>
+                              </a>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openBusinessHoursEditor(
+                                    restaurant
+                                  )
+                                }
+                                className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
+                              >
+                                영업시간 수정
+                              </button>
+
+                            </div>
+                          </article>
+                        );
+                      }
+                    )}
+                  </div>
+                </div>
+              )}
 
           </section>
 
@@ -2608,6 +3554,276 @@ export default function MapPage() {
 
         </div>
       )}
+
+      {/* 영업시간 등록/수정 모달 */}
+      {showBusinessHoursModal &&
+        businessHoursRestaurant && (
+          <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/35 px-4">
+
+            <div className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl">
+
+              <div className="flex items-start justify-between gap-3">
+
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-orange-500">
+                    NAVER 스마트플레이스 기준
+                  </p>
+
+                  <h3 className="mt-1 truncate text-lg font-bold text-gray-900">
+                    {businessHoursRestaurant.name}
+                  </h3>
+
+                  <p className="mt-1 text-xs leading-5 text-gray-400">
+                    네이버에서 확인한 영업시간을 입력해주세요.
+                    저장하면 추천 결과에 바로 반영됩니다.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={
+                    closeBusinessHoursEditor
+                  }
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100"
+                >
+                  ✕
+                </button>
+
+              </div>
+
+
+              <div className="mt-5">
+
+                <p className="text-xs font-bold text-gray-600">
+                  적용 요일
+                </p>
+
+                <div className="mt-2 grid grid-cols-7 gap-1">
+
+                  {BUSINESS_DAY_NAMES.map(
+                    (name, index) => (
+                      <button
+                        key={name}
+                        type="button"
+                        disabled={
+                          businessHoursApplyAllDays
+                        }
+                        onClick={() =>
+                          setBusinessHoursDay(
+                            index
+                          )
+                        }
+                        className={`rounded-lg py-2 text-xs font-bold transition ${
+                          businessHoursDay ===
+                            index &&
+                          !businessHoursApplyAllDays
+                            ? "bg-orange-500 text-white"
+                            : "bg-gray-100 text-gray-500"
+                        } disabled:opacity-40`}
+                      >
+                        {name}
+                      </button>
+                    )
+                  )}
+
+                </div>
+
+              </div>
+
+
+              <label className="mt-4 flex cursor-pointer items-center gap-2 rounded-xl bg-orange-50 px-3 py-3">
+
+                <input
+                  type="checkbox"
+                  checked={
+                    businessHoursApplyAllDays
+                  }
+                  onChange={(event) =>
+                    setBusinessHoursApplyAllDays(
+                      event.target.checked
+                    )
+                  }
+                  className="accent-orange-500"
+                />
+
+                <span className="text-xs font-semibold text-orange-700">
+                  매일 같은 시간으로 적용
+                </span>
+
+              </label>
+
+
+              <label className="mt-3 flex cursor-pointer items-center gap-2 rounded-xl bg-gray-50 px-3 py-3">
+
+                <input
+                  type="checkbox"
+                  checked={
+                    businessHoursClosed
+                  }
+                  onChange={(event) =>
+                    setBusinessHoursClosed(
+                      event.target.checked
+                    )
+                  }
+                  className="accent-red-500"
+                />
+
+                <span className="text-xs font-semibold text-gray-700">
+                  이 요일은 휴무
+                </span>
+
+              </label>
+
+
+              {!businessHoursClosed && (
+                <>
+
+                  <div className="mt-5 grid grid-cols-2 gap-3">
+
+                    <label>
+                      <span className="text-xs font-semibold text-gray-500">
+                        영업 시작
+                      </span>
+
+                      <input
+                        type="time"
+                        value={
+                          businessHoursOpen
+                        }
+                        onChange={(event) =>
+                          setBusinessHoursOpen(
+                            event.target.value
+                          )
+                        }
+                        className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-400"
+                      />
+                    </label>
+
+                    <label>
+                      <span className="text-xs font-semibold text-gray-500">
+                        영업 종료
+                      </span>
+
+                      <input
+                        type="time"
+                        value={
+                          businessHoursClose
+                        }
+                        onChange={(event) =>
+                          setBusinessHoursClose(
+                            event.target.value
+                          )
+                        }
+                        className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-400"
+                      />
+                    </label>
+
+                  </div>
+
+
+                  <div className="mt-5">
+
+                    <div>
+                      <p className="text-xs font-bold text-gray-600">
+                        브레이크타임
+                      </p>
+
+                      <p className="mt-1 text-[11px] text-gray-400">
+                        없으면 비워두세요.
+                      </p>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-2 gap-3">
+
+                      <input
+                        type="time"
+                        value={
+                          businessHoursBreakStart
+                        }
+                        onChange={(event) =>
+                          setBusinessHoursBreakStart(
+                            event.target.value
+                          )
+                        }
+                        className="w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-400"
+                      />
+
+                      <input
+                        type="time"
+                        value={
+                          businessHoursBreakEnd
+                        }
+                        onChange={(event) =>
+                          setBusinessHoursBreakEnd(
+                            event.target.value
+                          )
+                        }
+                        className="w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-400"
+                      />
+
+                    </div>
+
+                  </div>
+
+                </>
+              )}
+
+
+              <a
+                href={getNaverMapLink(
+                  businessHoursRestaurant
+                )}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-5 flex w-full items-center justify-center rounded-xl bg-green-50 py-3 text-xs font-bold text-green-700 transition hover:bg-green-100"
+              >
+                네이버 지도에서 영업시간 확인 →
+              </a>
+
+
+              {businessHoursError && (
+                <div className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-500">
+                  {businessHoursError}
+                </div>
+              )}
+
+
+              <div className="mt-5 flex gap-2">
+
+                <button
+                  type="button"
+                  disabled={
+                    businessHoursSaving
+                  }
+                  onClick={
+                    closeBusinessHoursEditor
+                  }
+                  className="flex-1 rounded-xl bg-gray-100 py-3 text-sm font-semibold text-gray-600 disabled:opacity-40"
+                >
+                  취소
+                </button>
+
+                <button
+                  type="button"
+                  disabled={
+                    businessHoursSaving
+                  }
+                  onClick={
+                    saveBusinessHours
+                  }
+                  className="flex-1 rounded-xl bg-orange-500 py-3 text-sm font-bold text-white transition hover:bg-orange-600 disabled:opacity-40"
+                >
+                  {businessHoursSaving
+                    ? "저장 중..."
+                    : "영업시간 저장"}
+                </button>
+
+              </div>
+
+            </div>
+
+          </div>
+        )}
 
       {/* 저장 위치 관리 모달 */}
       {showLocationManage &&

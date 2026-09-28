@@ -63,3 +63,5 @@ venv/
 /.claude/
 /.devin/
 /.agents/
+auth_bundle.txt
+naver_place_sample.txt

@@ -9,17 +9,17 @@ import {
   useRouter,
 } from "next/navigation";
 
+
 type LoginResponse = {
   success: boolean;
-
   message?: string;
-
   user?: {
     id: string;
     name: string;
     email: string;
   };
 };
+
 
 export default function LoginPage() {
   const router =
@@ -28,10 +28,8 @@ export default function LoginPage() {
   const [email, setEmail] =
     useState("");
 
-  const [
-    password,
-    setPassword,
-  ] = useState("");
+  const [password, setPassword] =
+    useState("");
 
   const [
     loading,
@@ -43,9 +41,6 @@ export default function LoginPage() {
     setError,
   ] = useState("");
 
-  /* =======================================================
-     로그인
-  ======================================================= */
 
   const handleLogin =
     async (
@@ -74,7 +69,8 @@ export default function LoginPage() {
           await fetch(
             "/api/login",
             {
-              method: "POST",
+              method:
+                "POST",
 
               headers: {
                 "Content-Type":
@@ -94,7 +90,9 @@ export default function LoginPage() {
           );
 
         const data =
-          (await response.json()) as LoginResponse;
+          (
+            await response.json()
+          ) as LoginResponse;
 
         if (!response.ok) {
           throw new Error(
@@ -103,48 +101,46 @@ export default function LoginPage() {
           );
         }
 
-        /*
-         * 예전에 사용하던 임시 사용자 localStorage 제거
-         *
-         * 이제 로그인 인증은
-         * HttpOnly Cookie 담당
-         */
         localStorage.removeItem(
           "jummechu_user"
         );
 
-        /*
-         * 로그인 성공
-         */
-        localStorage.removeItem("jummechu_preferences");
-        localStorage.removeItem("jummechu_saved_locations");
-        window.dispatchEvent(new Event("jummechu-authenticated"));
-        router.replace("/map");
-      } catch (error) {
-        console.error(error);
+        localStorage.removeItem(
+          "jummechu_preferences"
+        );
 
-        if (
-          error instanceof Error
-        ) {
-          setError(
-            error.message
-          );
-        } else {
-          setError(
-            "로그인 중 문제가 발생했습니다."
-          );
-        }
+        localStorage.removeItem(
+          "jummechu_saved_locations"
+        );
+
+        window.dispatchEvent(
+          new Event(
+            "jummechu-authenticated"
+          )
+        );
+
+        router.replace(
+          "/map"
+        );
+
+      } catch (loginError) {
+        setError(
+          loginError instanceof
+            Error
+            ? loginError.message
+            : "로그인 중 문제가 발생했습니다."
+        );
+
       } finally {
         setLoading(false);
       }
     };
 
+
   return (
     <main className="min-h-screen bg-[#faf8f5] px-5 py-7">
 
       <div className="mx-auto w-full max-w-md">
-
-        {/* 뒤로가기 */}
 
         <button
           type="button"
@@ -152,11 +148,11 @@ export default function LoginPage() {
             router.back()
           }
           className="flex h-9 w-9 items-center justify-center text-2xl text-gray-700"
+          aria-label="뒤로가기"
         >
-          ‹
+          ←
         </button>
 
-        {/* 제목 */}
 
         <section className="mt-12">
 
@@ -171,12 +167,11 @@ export default function LoginPage() {
           <p className="mt-3 text-sm leading-6 text-gray-500">
             로그인하고
             <br />
-            나만의 점심 추천을 확인해보세요.
+            오늘의 점심 추천을 확인해보세요.
           </p>
 
         </section>
 
-        {/* 로그인 FORM */}
 
         <form
           onSubmit={
@@ -184,8 +179,6 @@ export default function LoginPage() {
           }
           className="mt-10 space-y-5"
         >
-
-          {/* 이메일 */}
 
           <div>
 
@@ -196,9 +189,7 @@ export default function LoginPage() {
             <input
               type="email"
               value={email}
-              onChange={(
-                event
-              ) =>
+              onChange={(event) =>
                 setEmail(
                   event.target.value
                 )
@@ -210,22 +201,35 @@ export default function LoginPage() {
 
           </div>
 
-          {/* 비밀번호 */}
 
           <div>
 
-            <label className="text-sm font-bold text-gray-700">
-              비밀번호
-            </label>
+            <div className="flex items-center justify-between">
+
+              <label className="text-sm font-bold text-gray-700">
+                비밀번호
+              </label>
+
+              <button
+                type="button"
+                onClick={() =>
+                  router.push(
+                    "/forgot-password"
+                  )
+                }
+                className="text-xs font-bold text-orange-500"
+              >
+                비밀번호를 잊으셨나요?
+              </button>
+
+            </div>
 
             <input
               type="password"
               value={
                 password
               }
-              onChange={(
-                event
-              ) =>
+              onChange={(event) =>
                 setPassword(
                   event.target.value
                 )
@@ -237,7 +241,6 @@ export default function LoginPage() {
 
           </div>
 
-          {/* 오류 */}
 
           {error && (
             <div className="rounded-xl bg-red-50 px-4 py-3">
@@ -249,7 +252,6 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* 로그인 */}
 
           <button
             type="submit"
@@ -265,10 +267,8 @@ export default function LoginPage() {
 
         </form>
 
-        {/* 회원가입 */}
 
         <p className="mt-6 text-center text-xs text-gray-400">
-
           아직 계정이 없나요?{" "}
 
           <button

@@ -1,4 +1,3 @@
-import { rateLimit } from "@/lib/rate-limit";
 import {
   NextResponse,
 } from "next/server";
@@ -14,54 +13,58 @@ import {
 } from "@/lib/prisma";
 
 import {
+  rateLimit,
+} from "@/lib/rate-limit";
+
+import {
   createSessionToken,
   SESSION_COOKIE_NAME,
   SESSION_DURATION,
 } from "@/lib/auth";
 
+import {
+  isValidEmail,
+  normalizeEmail,
+} from "@/lib/email-verification";
+
+
+type VerifiedRow = {
+  email_verified_at:
+    Date | null;
+};
+
+
 export async function POST(
   request: Request
 ) {
   try {
-    const limited = rateLimit("login-global", 60, 60_000);
-    if (limited) return limited;
-    const body = await request.json().catch(() => null);
-    if (!body || typeof body.email !== "string" || typeof body.password !== "string") {
-      return NextResponse.json({ message: "이메일과 비밀번호를 확인해주세요." }, { status: 400 });
-    }
-
-    const email =
-      String(
-        body.email ?? ""
-      )
-        .trim()
-        .toLowerCase();
-
-    const password =
-      String(
-        body.password ?? ""
+    const limited =
+      rateLimit(
+        "login-global",
+        60,
+        60_000
       );
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255 || password.length > 1024) {
-      return NextResponse.json({ message: "이메일 또는 비밀번호 형식이 올바르지 않습니다." }, { status: 400 });
+    if (limited) {
+      return limited;
     }
-    const accountLimit = rateLimit("login-email", 10, 15 * 60_000, email);
-    if (accountLimit) return accountLimit;
 
-    /* =========================
-       검증
-    ========================== */
+    const body =
+      await request
+        .json()
+        .catch(() => null);
 
     if (
-      !email ||
-      !password
+      !body ||
+      typeof body.email !==
+        "string" ||
+      typeof body.password !==
+        "string"
     ) {
       return NextResponse.json(
         {
-          success: false,
-
           message:
-            "이메일과 비밀번호를 입력해주세요.",
+            "이메일과 비밀번호를 확인해주세요.",
         },
         {
           status: 400,
@@ -69,9 +72,43 @@ export async function POST(
       );
     }
 
-    /* =========================
-       사용자 검색
-    ========================== */
+    const email =
+      normalizeEmail(
+        body.email
+      );
+
+    const password =
+      body.password;
+
+    if (
+      !isValidEmail(
+        email
+      ) ||
+      password.length >
+        1024
+    ) {
+      return NextResponse.json(
+        {
+          message:
+            "이메일 또는 비밀번호가 올바르지 않습니다.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    const accountLimit =
+      rateLimit(
+        "login-email",
+        10,
+        15 * 60_000,
+        email
+      );
+
+    if (accountLimit) {
+      return accountLimit;
+    }
 
     const user =
       await prisma.users.findUnique({
@@ -80,15 +117,10 @@ export async function POST(
         },
       });
 
-    /*
-     * 이메일 존재 여부를
-     * 너무 구체적으로 알려주지 않음
-     */
     if (!user) {
       return NextResponse.json(
         {
           success: false,
-
           message:
             "이메일 또는 비밀번호가 올바르지 않습니다.",
         },
@@ -97,10 +129,6 @@ export async function POST(
         }
       );
     }
-
-    /* =========================
-       비밀번호 확인
-    ========================== */
 
     const passwordMatches =
       await bcrypt.compare(
@@ -112,7 +140,6 @@ export async function POST(
       return NextResponse.json(
         {
           success: false,
-
           message:
             "이메일 또는 비밀번호가 올바르지 않습니다.",
         },
@@ -122,18 +149,36 @@ export async function POST(
       );
     }
 
-    /* =========================
-       SESSION TOKEN
-    ========================== */
+    const verifiedRows =
+      await prisma.$queryRaw<
+        VerifiedRow[]
+      >`
+        SELECT email_verified_at
+        FROM users
+        WHERE id = ${user.id}
+        LIMIT 1
+      `;
+
+    if (
+      !verifiedRows[0]
+        ?.email_verified_at
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "이메일 인증이 필요한 계정입니다.",
+        },
+        {
+          status: 403,
+        }
+      );
+    }
 
     const token =
       await createSessionToken(
         user.id.toString()
       );
-
-    /* =========================
-       HTTP ONLY COOKIE
-    ========================== */
 
     const cookieStore =
       await cookies();
@@ -148,18 +193,16 @@ export async function POST(
           process.env.NODE_ENV ===
           "production",
 
-        sameSite: "lax",
+        sameSite:
+          "lax",
 
-        path: "/",
+        path:
+          "/",
 
         maxAge:
           SESSION_DURATION,
       }
     );
-
-    /* =========================
-       응답
-    ========================== */
 
     return NextResponse.json({
       success: true,
@@ -178,6 +221,7 @@ export async function POST(
           user.email,
       },
     });
+
   } catch (error) {
     console.error(
       "LOGIN ERROR:",
@@ -187,9 +231,8 @@ export async function POST(
     return NextResponse.json(
       {
         success: false,
-
         message:
-          "로그인 중 오류가 발생했습니다.",
+          "로그인 중 문제가 발생했습니다.",
       },
       {
         status: 500,

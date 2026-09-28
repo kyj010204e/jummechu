@@ -16,44 +16,18 @@ type ApiResponse = {
   message?: string;
   verificationToken?: string;
   resendAfterSeconds?: number;
-  user?: {
-    id: string;
-    name: string;
-    email: string;
-  };
 };
 
 
-export default function SignupPage() {
+export default function ForgotPasswordPage() {
   const router =
     useRouter();
-
-  const [name, setName] =
-    useState("");
 
   const [email, setEmail] =
     useState("");
 
-  const [password, setPassword] =
-    useState("");
-
-  const [
-    passwordConfirm,
-    setPasswordConfirm,
-  ] = useState("");
-
   const [code, setCode] =
     useState("");
-
-  const [
-    codeSent,
-    setCodeSent,
-  ] = useState(false);
-
-  const [
-    emailVerified,
-    setEmailVerified,
-  ] = useState(false);
 
   const [
     verificationToken,
@@ -61,31 +35,48 @@ export default function SignupPage() {
   ] = useState("");
 
   const [
+    password,
+    setPassword,
+  ] = useState("");
+
+  const [
+    passwordConfirm,
+    setPasswordConfirm,
+  ] = useState("");
+
+  const [
+    codeSent,
+    setCodeSent,
+  ] = useState(false);
+
+  const [
+    verified,
+    setVerified,
+  ] = useState(false);
+
+  const [
+    finished,
+    setFinished,
+  ] = useState(false);
+
+  const [
     resendSeconds,
     setResendSeconds,
   ] = useState(0);
-
-  const [
-    sendLoading,
-    setSendLoading,
-  ] = useState(false);
-
-  const [
-    verifyLoading,
-    setVerifyLoading,
-  ] = useState(false);
 
   const [
     loading,
     setLoading,
   ] = useState(false);
 
-  const [error, setError] =
-    useState("");
+  const [
+    error,
+    setError,
+  ] = useState("");
 
   const [
-    successMessage,
-    setSuccessMessage,
+    message,
+    setMessage,
   ] = useState("");
 
 
@@ -117,22 +108,18 @@ export default function SignupPage() {
   }, [resendSeconds]);
 
 
-  function handleEmailChange(
-    value: string
-  ) {
-    setEmail(value);
-
-    setEmailVerified(
-      false
-    );
+  function resetVerification() {
+    setCode("");
 
     setVerificationToken(
       ""
     );
 
-    setCode("");
-
     setCodeSent(
+      false
+    );
+
+    setVerified(
       false
     );
 
@@ -140,9 +127,9 @@ export default function SignupPage() {
       0
     );
 
-    setError("");
+    setMessage("");
 
-    setSuccessMessage("");
+    setError("");
   }
 
 
@@ -152,9 +139,7 @@ export default function SignupPage() {
         .trim()
         .toLowerCase();
 
-    if (
-      !normalizedEmail
-    ) {
+    if (!normalizedEmail) {
       setError(
         "이메일을 입력해주세요."
       );
@@ -163,13 +148,11 @@ export default function SignupPage() {
     }
 
     try {
-      setSendLoading(
-        true
-      );
+      setLoading(true);
 
       setError("");
 
-      setSuccessMessage("");
+      setMessage("");
 
       const response =
         await fetch(
@@ -189,7 +172,7 @@ export default function SignupPage() {
                   normalizedEmail,
 
                 purpose:
-                  "signup",
+                  "password_reset",
               }),
           }
         );
@@ -225,9 +208,9 @@ export default function SignupPage() {
           60
       );
 
-      setSuccessMessage(
+      setMessage(
         data.message ??
-          "인증번호를 발송했습니다."
+          "가입된 이메일이라면 인증번호를 발송했습니다."
       );
 
     } catch (requestError) {
@@ -239,9 +222,7 @@ export default function SignupPage() {
       );
 
     } finally {
-      setSendLoading(
-        false
-      );
+      setLoading(false);
     }
   }
 
@@ -260,13 +241,9 @@ export default function SignupPage() {
     }
 
     try {
-      setVerifyLoading(
-        true
-      );
+      setLoading(true);
 
       setError("");
-
-      setSuccessMessage("");
 
       const response =
         await fetch(
@@ -288,7 +265,7 @@ export default function SignupPage() {
                     .toLowerCase(),
 
                 purpose:
-                  "signup",
+                  "password_reset",
 
                 code,
               }),
@@ -314,12 +291,12 @@ export default function SignupPage() {
         data.verificationToken
       );
 
-      setEmailVerified(
+      setVerified(
         true
       );
 
-      setSuccessMessage(
-        "이메일 인증이 완료되었습니다."
+      setMessage(
+        "이메일 인증이 완료되었습니다. 새 비밀번호를 입력해주세요."
       );
 
     } catch (verifyError) {
@@ -331,44 +308,16 @@ export default function SignupPage() {
       );
 
     } finally {
-      setVerifyLoading(
-        false
-      );
+      setLoading(false);
     }
   }
 
 
-  async function handleSignup(
+  async function resetPassword(
     event:
       FormEvent<HTMLFormElement>
   ) {
     event.preventDefault();
-
-    setError("");
-
-    if (
-      !name.trim() ||
-      !email.trim() ||
-      !password ||
-      !passwordConfirm
-    ) {
-      setError(
-        "모든 항목을 입력해주세요."
-      );
-
-      return;
-    }
-
-    if (
-      !emailVerified ||
-      !verificationToken
-    ) {
-      setError(
-        "이메일 인증을 먼저 완료해주세요."
-      );
-
-      return;
-    }
 
     if (
       password.length < 8
@@ -394,9 +343,11 @@ export default function SignupPage() {
     try {
       setLoading(true);
 
+      setError("");
+
       const response =
         await fetch(
-          "/api/signup",
+          "/api/password-reset/confirm",
           {
             method:
               "POST",
@@ -408,9 +359,6 @@ export default function SignupPage() {
 
             body:
               JSON.stringify({
-                name:
-                  name.trim(),
-
                 email:
                   email
                     .trim()
@@ -431,49 +379,71 @@ export default function SignupPage() {
       if (!response.ok) {
         throw new Error(
           data.message ??
-            "회원가입에 실패했습니다."
+            "비밀번호 변경에 실패했습니다."
         );
       }
 
-      if (!data.user) {
-        throw new Error(
-          "회원 정보를 불러오지 못했습니다."
-        );
-      }
-
-      localStorage.removeItem(
-        "jummechu_user"
+      setFinished(
+        true
       );
 
-      localStorage.removeItem(
-        "jummechu_preferences"
+      setMessage(
+        data.message ??
+          "비밀번호가 변경되었습니다."
       );
 
-      localStorage.removeItem(
-        "jummechu_saved_locations"
-      );
-
-      window.dispatchEvent(
-        new Event(
-          "jummechu-authenticated"
-        )
-      );
-
-      router.push(
-        "/preferences"
-      );
-
-    } catch (signupError) {
+    } catch (resetError) {
       setError(
-        signupError instanceof
+        resetError instanceof
           Error
-          ? signupError.message
-          : "회원가입 중 문제가 발생했습니다."
+          ? resetError.message
+          : "비밀번호 변경에 실패했습니다."
       );
 
     } finally {
       setLoading(false);
     }
+  }
+
+
+  if (finished) {
+    return (
+      <main className="min-h-screen bg-[#faf8f5] px-5 py-7">
+
+        <div className="mx-auto flex min-h-[70vh] w-full max-w-md items-center">
+
+          <div className="w-full rounded-3xl bg-white p-7 text-center shadow-sm">
+
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-50 text-2xl">
+              ✓
+            </div>
+
+            <h1 className="mt-5 text-2xl font-extrabold text-gray-900">
+              비밀번호 변경 완료
+            </h1>
+
+            <p className="mt-3 text-sm leading-6 text-gray-500">
+              {message}
+            </p>
+
+            <button
+              type="button"
+              onClick={() =>
+                router.replace(
+                  "/login"
+                )
+              }
+              className="mt-7 w-full rounded-xl bg-orange-500 py-4 text-sm font-bold text-white"
+            >
+              로그인하러 가기
+            </button>
+
+          </div>
+
+        </div>
+
+      </main>
+    );
   }
 
 
@@ -497,50 +467,23 @@ export default function SignupPage() {
         <section className="mt-10">
 
           <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-orange-50 text-2xl">
-            🍽️
+            🔐
           </div>
 
           <h1 className="mt-6 text-3xl font-extrabold tracking-tight text-gray-900">
-            점메추 시작하기
+            비밀번호 찾기
           </h1>
 
           <p className="mt-3 text-sm leading-6 text-gray-500">
-            이메일 인증 후 가입할 수 있어요.
+            가입한 이메일로 인증한 뒤
             <br />
-            가입이 끝나면 취향 메뉴를 선택해요.
+            새 비밀번호를 설정할 수 있어요.
           </p>
 
         </section>
 
 
-        <form
-          onSubmit={
-            handleSignup
-          }
-          className="mt-9 space-y-5"
-        >
-
-          <div>
-
-            <label className="text-sm font-bold text-gray-700">
-              이름
-            </label>
-
-            <input
-              type="text"
-              value={name}
-              onChange={(event) =>
-                setName(
-                  event.target.value
-                )
-              }
-              placeholder="이름을 입력해주세요"
-              autoComplete="name"
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-800 outline-none transition placeholder:text-gray-300 focus:border-orange-400"
-            />
-
-          </div>
-
+        <div className="mt-9 space-y-5">
 
           <div>
 
@@ -554,39 +497,37 @@ export default function SignupPage() {
                 type="email"
                 value={email}
                 disabled={
-                  emailVerified
+                  verified
                 }
-                onChange={(event) =>
-                  handleEmailChange(
+                onChange={(event) => {
+                  setEmail(
                     event.target.value
-                  )
-                }
+                  );
+
+                  resetVerification();
+                }}
                 placeholder="example@email.com"
                 autoComplete="email"
-                className="min-w-0 flex-1 rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-800 outline-none transition placeholder:text-gray-300 focus:border-orange-400 disabled:bg-gray-50"
+                className="min-w-0 flex-1 rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-800 outline-none focus:border-orange-400 disabled:bg-gray-50"
               />
 
               <button
                 type="button"
                 disabled={
-                  sendLoading ||
-                  emailVerified ||
+                  loading ||
+                  verified ||
                   resendSeconds > 0
                 }
                 onClick={
                   requestCode
                 }
-                className="shrink-0 rounded-xl bg-orange-500 px-4 text-xs font-bold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400"
+                className="shrink-0 rounded-xl bg-orange-500 px-4 text-xs font-bold text-white disabled:bg-gray-200 disabled:text-gray-400"
               >
-                {sendLoading
-                  ? "발송 중..."
-                  : emailVerified
-                    ? "인증완료"
-                    : resendSeconds > 0
-                      ? `${resendSeconds}초`
-                      : codeSent
-                        ? "재발송"
-                        : "인증번호 받기"}
+                {resendSeconds > 0
+                  ? `${resendSeconds}초`
+                  : codeSent
+                    ? "재발송"
+                    : "인증번호 받기"}
               </button>
 
             </div>
@@ -595,7 +536,7 @@ export default function SignupPage() {
 
 
           {codeSent &&
-            !emailVerified && (
+            !verified && (
               <div>
 
                 <label className="text-sm font-bold text-gray-700">
@@ -623,13 +564,13 @@ export default function SignupPage() {
                       )
                     }
                     placeholder="6자리 인증번호"
-                    className="min-w-0 flex-1 rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm tracking-[0.3em] text-gray-800 outline-none transition placeholder:tracking-normal placeholder:text-gray-300 focus:border-orange-400"
+                    className="min-w-0 flex-1 rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm tracking-[0.3em] outline-none focus:border-orange-400"
                   />
 
                   <button
                     type="button"
                     disabled={
-                      verifyLoading ||
+                      loading ||
                       code.length !== 6
                     }
                     onClick={
@@ -637,127 +578,101 @@ export default function SignupPage() {
                     }
                     className="shrink-0 rounded-xl bg-gray-900 px-5 text-xs font-bold text-white disabled:bg-gray-200 disabled:text-gray-400"
                   >
-                    {verifyLoading
-                      ? "확인 중..."
-                      : "확인"}
+                    확인
                   </button>
 
                 </div>
 
-                <p className="mt-2 text-[11px] text-gray-400">
-                  인증번호는 10분 동안 유효해요.
-                </p>
-
               </div>
             )}
 
 
-          {emailVerified && (
-            <div className="rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold text-emerald-600">
-              ✓ 이메일 인증이 완료되었습니다.
+          {message && (
+            <div className="rounded-xl bg-emerald-50 px-4 py-3 text-xs leading-5 text-emerald-600">
+              {message}
             </div>
           )}
 
 
-          <div>
-
-            <label className="text-sm font-bold text-gray-700">
-              비밀번호
-            </label>
-
-            <input
-              type="password"
-              value={
-                password
+          {verified && (
+            <form
+              onSubmit={
+                resetPassword
               }
-              onChange={(event) =>
-                setPassword(
-                  event.target.value
-                )
-              }
-              placeholder="8자 이상 입력해주세요"
-              autoComplete="new-password"
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-800 outline-none transition placeholder:text-gray-300 focus:border-orange-400"
-            />
+              className="space-y-5"
+            >
 
-          </div>
+              <div>
 
+                <label className="text-sm font-bold text-gray-700">
+                  새 비밀번호
+                </label>
 
-          <div>
+                <input
+                  type="password"
+                  value={
+                    password
+                  }
+                  onChange={(event) =>
+                    setPassword(
+                      event.target.value
+                    )
+                  }
+                  placeholder="8자 이상 입력해주세요"
+                  autoComplete="new-password"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm outline-none focus:border-orange-400"
+                />
 
-            <label className="text-sm font-bold text-gray-700">
-              비밀번호 확인
-            </label>
-
-            <input
-              type="password"
-              value={
-                passwordConfirm
-              }
-              onChange={(event) =>
-                setPasswordConfirm(
-                  event.target.value
-                )
-              }
-              placeholder="비밀번호를 다시 입력해주세요"
-              autoComplete="new-password"
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-800 outline-none transition placeholder:text-gray-300 focus:border-orange-400"
-            />
-
-          </div>
-
-
-          {successMessage &&
-            !emailVerified && (
-              <div className="rounded-xl bg-emerald-50 px-4 py-3 text-xs leading-5 text-emerald-600">
-                {successMessage}
               </div>
-            )}
+
+
+              <div>
+
+                <label className="text-sm font-bold text-gray-700">
+                  새 비밀번호 확인
+                </label>
+
+                <input
+                  type="password"
+                  value={
+                    passwordConfirm
+                  }
+                  onChange={(event) =>
+                    setPasswordConfirm(
+                      event.target.value
+                    )
+                  }
+                  placeholder="새 비밀번호를 다시 입력해주세요"
+                  autoComplete="new-password"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-4 text-sm outline-none focus:border-orange-400"
+                />
+
+              </div>
+
+
+              <button
+                type="submit"
+                disabled={
+                  loading
+                }
+                className="w-full rounded-xl bg-orange-500 py-4 text-sm font-bold text-white disabled:opacity-50"
+              >
+                {loading
+                  ? "변경 중..."
+                  : "비밀번호 변경"}
+              </button>
+
+            </form>
+          )}
 
 
           {error && (
-            <div className="rounded-xl bg-red-50 px-4 py-3">
-
-              <p className="text-xs leading-5 text-red-500">
-                {error}
-              </p>
-
+            <div className="rounded-xl bg-red-50 px-4 py-3 text-xs leading-5 text-red-500">
+              {error}
             </div>
           )}
 
-
-          <button
-            type="submit"
-            disabled={
-              loading ||
-              !emailVerified
-            }
-            className="w-full rounded-xl bg-orange-500 py-4 text-sm font-bold text-white shadow-lg shadow-orange-100 transition hover:bg-orange-600 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none"
-          >
-            {loading
-              ? "가입 중..."
-              : "회원가입"}
-          </button>
-
-        </form>
-
-
-        <p className="mt-6 text-center text-xs text-gray-400">
-          이미 계정이 있나요?{" "}
-
-          <button
-            type="button"
-            onClick={() =>
-              router.push(
-                "/login"
-              )
-            }
-            className="font-bold text-orange-500"
-          >
-            로그인
-          </button>
-
-        </p>
+        </div>
 
       </div>
 

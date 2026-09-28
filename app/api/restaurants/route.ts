@@ -7,6 +7,11 @@ import {
 import { rateLimit } from "@/lib/rate-limit";
 
 import {
+  attachRestaurantPrices,
+  type RestaurantPriceFields,
+} from "@/lib/price-resolver";
+
+import {
   NextRequest,
   NextResponse,
 } from "next/server";
@@ -42,6 +47,22 @@ const EXCLUDED_NAVER_FAMILIES =
   new Set([
     "기타",
     "밥",
+
+    /*
+     * 아래 표현들은 너무 넓어서
+     * "국", "볶음"만으로 NAVER 검색 시
+     * 관련 없는 식당이 많이 섞입니다.
+     */
+    "국",
+    "볶음",
+    "구이",
+    "튀김",
+    "조림",
+    "찜",
+    "전",
+    "무침",
+    "떡",
+    "면류",
   ]);
 
 
@@ -53,6 +74,26 @@ const EXCLUDED_NAVER_FAMILIES =
 const PROFILE_WEIGHT = 0.60;
 const BEST_ANCHOR_WEIGHT = 0.30;
 const MEAN_ANCHOR_WEIGHT = 0.10;
+
+const FAVORITE_ANCHOR_PRIORITY_BONUS = 0.08;
+const FAVORITE_BASE_SCORE_BONUS = 0.03;
+const FAVORITE_SLOT_RATIO = 0.30;
+const FAVORITE_MIN_SIMILARITY = 0.20;
+
+/*
+ * 이름이 비슷하다는 이유만으로
+ * 감자탕 -> 감자밥 같은 후보가 최애 슬롯을 차지하지 않도록
+ * 음식 Family 적합도를 함께 사용합니다.
+ */
+const ANCHOR_FAMILY_PRIORITY_BONUS = 0.08;
+const ANCHOR_FAMILY_BASE_BONUS = 0.04;
+const FAVORITE_MIN_FAMILY_AFFINITY = 0.55;
+
+/*
+ * NAVER 검색 결과와 추천 메뉴의 업종 적합도.
+ * 너무 동떨어진 결과는 matchedPreferences에 넣지 않습니다.
+ */
+const MIN_NAVER_MATCH_RELEVANCE = 0.60;
 
 
 /*
@@ -154,7 +195,7 @@ type NaverLocalResponse = {
    응답 음식점 타입
 ========================================================= */
 
-type Restaurant = {
+type RestaurantCore = {
   id: string;
 
   name: string;
@@ -180,6 +221,18 @@ type Restaurant = {
   matchedPreferences: string[];
 
   /*
+   * 이 음식점과 가장 강하게 연결된 추천 메뉴.
+   *
+   * NAVER 검색에 사용된 sourceMenu 중
+   * adjustedSearchScore가 가장 높은 메뉴를 선택합니다.
+   */
+  recommendedMenuName:
+    string | null;
+
+  recommendedMenuScore:
+    number | null;
+
+  /*
    * AI 메뉴 취향 점수
    */
   preferenceScore: number;
@@ -190,9 +243,92 @@ type Restaurant = {
   distanceScore: number;
 
   /*
-   * 최종 추천 점수
+   * 가격 데이터 연결 전 기본 추천 점수.
+   *
+   * 가격 비교가 가능하면 price-resolver에서
+   * 메뉴 + 가격 + 거리 점수로 다시 계산합니다.
    */
   recommendScore: number;
+};
+
+
+type Restaurant =
+  RestaurantCore &
+  RestaurantPriceFields & {
+
+    /*
+     * 현재 영업 상태
+     *
+     * NAVER 지역검색 API 자체에는 영업시간 필드가 없으므로
+     * restaurant_business_hours 테이블의 검증된 데이터를 사용합니다.
+     */
+    businessHours:
+      BusinessHoursInfo;
+
+    /*
+     * 추천 목록에 포함 가능한지 여부.
+     *
+     * OPEN / UNKNOWN  -> true
+     * BREAK / CLOSED / CLOSED_TODAY -> false
+     */
+    recommendationEligible:
+      boolean;
+  };
+
+
+/* =========================================================
+   영업시간 타입
+========================================================= */
+
+type BusinessStatus =
+  | "OPEN"
+  | "BREAK"
+  | "CLOSED"
+  | "CLOSED_TODAY"
+  | "UNKNOWN";
+
+
+type BusinessHoursInfo = {
+  status: BusinessStatus;
+
+  label: string;
+
+  detail: string | null;
+
+  todayOpen: string | null;
+  todayClose: string | null;
+
+  breakStart: string | null;
+  breakEnd: string | null;
+
+  nextOpenText: string | null;
+
+  source: string | null;
+
+  verifiedAt: string | null;
+};
+
+
+type RawBusinessHoursRow = {
+  restaurant_key: string;
+
+  day_of_week: number;
+
+  open_time: string | null;
+  close_time: string | null;
+
+  break_start_time:
+    string | null;
+
+  break_end_time:
+    string | null;
+
+  is_closed: boolean;
+
+  source: string | null;
+
+  verified_at:
+    Date | string | null;
 };
 
 
@@ -302,6 +438,7 @@ type RecommendationCandidate = {
 
 
 type SearchTermKind =
+  | "favorite"
   | "menu"
   | "family"
   | "category";
@@ -339,6 +476,11 @@ const PREFERENCE_KEYWORDS:
   Record<string, string> = {
 
   korean: "한식",
+
+  rice: "밥",
+  soup: "찌개",
+  snack: "분식",
+  western: "양식",
 
   noodle: "면",
 
@@ -392,6 +534,590 @@ function stripHtml(
     /<[^>]*>/g,
     ""
   );
+}
+
+
+/* =========================================================
+   NAVER 업종 필터
+========================================================= */
+
+const BLOCKED_NAVER_CATEGORY_KEYWORDS = [
+  "쇼핑",
+  "유통",
+  "슈퍼",
+  "마트",
+  "편의점",
+  "제조업",
+  "식품제조",
+  "도매",
+  "소매",
+  "주점",
+  "술집",
+  "노래방",
+  "숙박",
+];
+
+
+const FOOD_NAVER_CATEGORY_KEYWORDS = [
+  "음식점",
+  "음식",
+  "요리",
+  "한식",
+  "일식",
+  "중식",
+  "양식",
+  "분식",
+  "국밥",
+  "냉면",
+  "칼국수",
+  "만두",
+  "라면",
+  "돈가스",
+  "초밥",
+  "롤",
+  "고기",
+  "갈비",
+  "곱창",
+  "족발",
+  "보쌈",
+  "치킨",
+  "피자",
+  "햄버거",
+  "샌드위치",
+  "베트남",
+  "태국",
+  "인도",
+  "멕시코",
+  "이탈리아",
+  "아시아",
+  "죽",
+  "도시락",
+  "카페",
+  "디저트",
+  "베이커리",
+  "제과",
+];
+
+
+const CAFE_NAVER_CATEGORY_KEYWORDS = [
+  "카페",
+  "디저트",
+  "베이커리",
+  "제과",
+];
+
+
+const CAFE_FRIENDLY_MENU_KEYWORDS = [
+  "카페",
+  "커피",
+  "디저트",
+  "베이커리",
+  "빵",
+  "케이크",
+  "쿠키",
+  "도넛",
+  "와플",
+  "마카롱",
+  "아이스크림",
+  "빙수",
+  "약과",
+  "인절미",
+  "찹쌀떡",
+  "송편",
+  "떡",
+];
+
+
+function includesAny(
+  value: string,
+  keywords: string[]
+) {
+
+  return keywords.some(
+    (keyword) =>
+      value.includes(
+        keyword
+      )
+  );
+}
+
+
+function inferNaverCategoryGroups(
+  category: string
+) {
+
+  const groups =
+    new Set<string>();
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "라면",
+        "냉면",
+        "칼국수",
+        "국수",
+        "우동",
+        "짬뽕",
+        "짜장",
+        "자장",
+        "면",
+      ]
+    )
+  ) {
+    groups.add(
+      "noodle"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "국밥",
+        "해장국",
+        "설렁탕",
+        "곰탕",
+        "찌개",
+        "탕",
+        "전골",
+      ]
+    )
+  ) {
+    groups.add(
+      "soup"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "돈가스",
+        "돈까스",
+        "튀김",
+        "치킨",
+      ]
+    )
+  ) {
+    groups.add(
+      "fried"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "육류",
+        "고기",
+        "갈비",
+        "곱창",
+        "삼겹살",
+        "구이",
+        "족발",
+        "보쌈",
+        "찜닭",
+        "닭갈비",
+        "닭발",
+        "수육",
+        "뭉티기",
+        "육회",
+      ]
+    )
+  ) {
+    groups.add(
+      "meat"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "해물",
+        "생선",
+        "주꾸미",
+        "쭈꾸미",
+        "낙지",
+        "오징어",
+        "아구",
+        "아귀",
+        "장어",
+      ]
+    )
+  ) {
+    groups.add(
+      "seafood"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "초밥",
+        "롤",
+        "사시미",
+        "회",
+      ]
+    )
+  ) {
+    groups.add(
+      "sushi"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "김밥",
+        "덮밥",
+        "볶음밥",
+        "비빔밥",
+        "도시락",
+      ]
+    )
+  ) {
+    groups.add(
+      "rice"
+    );
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "분식",
+        "떡볶이",
+      ]
+    )
+  ) {
+    groups.add(
+      "snack"
+    );
+  }
+
+
+  return groups;
+}
+
+
+function getNaverMenuCategoryRelevance(
+  item: NaverLocalItem,
+  searchTerm: SearchTerm
+) {
+
+  const category =
+    stripHtml(
+      item.category ?? ""
+    );
+
+
+  const title =
+    stripHtml(
+      item.title ?? ""
+    );
+
+
+  const sourceFamily =
+    getFoodFamily(
+      searchTerm.sourceMenu,
+      null
+    );
+
+
+  const sourceGroup =
+    getFamilyGroup(
+      sourceFamily
+    );
+
+
+  const categoryGroups =
+    inferNaverCategoryGroups(
+      category
+    );
+
+
+  const titleGroups =
+    inferNaverCategoryGroups(
+      title
+    );
+
+
+  /*
+   * 제목/업종에 Family가 직접 들어가면 가장 강한 신호.
+   */
+  if (
+    sourceFamily !== "기타" &&
+    (
+      title.includes(
+        sourceFamily
+      ) ||
+      category.includes(
+        sourceFamily
+      )
+    )
+  ) {
+    return 1.0;
+  }
+
+
+  if (
+    categoryGroups.has(
+      sourceGroup
+    ) ||
+    titleGroups.has(
+      sourceGroup
+    )
+  ) {
+    return 0.95;
+  }
+
+
+  /*
+   * 가게 이름 자체가 특정 메뉴 전문점인데
+   * 추천 메뉴군과 전혀 다르면 검색 노이즈일 가능성이 높습니다.
+   *
+   * 예:
+   * 물냉면 -> 백선당찜닭
+   * 불고기덮밥 -> 상무초밥
+   * 볶음밥 -> 떡볶이농장
+   */
+  if (
+    titleGroups.size > 0
+  ) {
+    return 0.45;
+  }
+
+
+  /*
+   * 전문 업종 정보가 있는데 추천 메뉴군과 다르면
+   * broad cuisine(한식/일식/중식)보다 이 정보를 우선합니다.
+   *
+   * 예:
+   * 짬뽕라면 -> 한식>육류,고기요리
+   * 볶음우동 -> 일식>돈가스
+   * 감자국   -> 한식>칼국수,만두
+   *
+   * 기존에는 "한식/일식"이라는 이유로 통과했지만,
+   * 이제 전문 업종 mismatch면 여기서 낮은 점수를 줍니다.
+   */
+  if (
+    categoryGroups.size > 0
+  ) {
+    return 0.45;
+  }
+
+
+  /*
+   * 넓은 음식 업종은 실제로 여러 메뉴를 판매할 수 있으므로
+   * 적당한 relevance를 줍니다.
+   */
+  if (
+    category.includes(
+      "한식"
+    )
+  ) {
+
+    if (
+      [
+        "rice",
+        "soup",
+        "meat",
+        "noodle",
+        "snack",
+      ].includes(
+        sourceGroup
+      )
+    ) {
+      return 0.82;
+    }
+
+    return 0.68;
+  }
+
+
+  if (
+    category.includes(
+      "일식"
+    )
+  ) {
+
+    if (
+      [
+        "rice",
+        "noodle",
+        "fried",
+        "sushi",
+      ].includes(
+        sourceGroup
+      )
+    ) {
+      return 0.85;
+    }
+
+    return 0.62;
+  }
+
+
+  if (
+    category.includes(
+      "중식"
+    )
+  ) {
+
+    if (
+      [
+        "rice",
+        "noodle",
+        "meat",
+      ].includes(
+        sourceGroup
+      )
+    ) {
+      return 0.88;
+    }
+
+    return 0.60;
+  }
+
+
+  if (
+    category.includes(
+      "분식"
+    )
+  ) {
+
+    if (
+      [
+        "rice",
+        "noodle",
+        "fried",
+        "snack",
+      ].includes(
+        sourceGroup
+      )
+    ) {
+      return 0.88;
+    }
+
+    return 0.60;
+  }
+
+
+  if (
+    includesAny(
+      category,
+      [
+        "멕시코",
+        "남미",
+        "인도",
+        "태국",
+        "베트남",
+        "이탈리아",
+        "피자",
+        "햄버거",
+      ]
+    )
+  ) {
+    return 0.50;
+  }
+
+
+  /*
+   * 단순 "음식점>..." 정도만 있는 경우는
+   * NAVER 검색 결과 자체의 신호를 어느 정도 신뢰.
+   */
+  if (
+    category.includes(
+      "음식점"
+    ) ||
+    category.includes(
+      "음식"
+    ) ||
+    category.includes(
+      "요리"
+    )
+  ) {
+    return 0.72;
+  }
+
+
+  return 0.55;
+}
+
+
+function isRelevantNaverResult(
+  item: NaverLocalItem,
+  searchTerm: SearchTerm
+) {
+
+  const category =
+    stripHtml(
+      item.category ?? ""
+    );
+
+
+  if (
+    includesAny(
+      category,
+      BLOCKED_NAVER_CATEGORY_KEYWORDS
+    )
+  ) {
+
+    return false;
+  }
+
+
+  if (
+    !includesAny(
+      category,
+      FOOD_NAVER_CATEGORY_KEYWORDS
+    )
+  ) {
+
+    return false;
+  }
+
+
+  const isCafeCategory =
+    includesAny(
+      category,
+      CAFE_NAVER_CATEGORY_KEYWORDS
+    );
+
+
+  if (
+    isCafeCategory
+  ) {
+
+    const searchContext =
+      `${searchTerm.name} ${searchTerm.sourceMenu}`;
+
+
+    if (
+      !includesAny(
+        searchContext,
+        CAFE_FRIENDLY_MENU_KEYWORDS
+      )
+    ) {
+
+      return false;
+    }
+  }
+
+
+  return true;
 }
 
 
@@ -722,21 +1448,31 @@ function getFoodFamily(
   }
 
 
+  /*
+   * 치킨가스/생선가스도 "가스류"로 묶어야
+   * 돈가스 최애와 자연스럽게 연결됩니다.
+   *
+   * 반드시 일반 치킨 판정보다 먼저 검사합니다.
+   */
+  if (
+    name.includes("돈가스") ||
+    name.includes("돈까스") ||
+    name.includes("치킨가스") ||
+    name.includes("치킨까스") ||
+    name.includes("생선가스") ||
+    name.includes("생선까스")
+  ) {
+
+    return "돈가스";
+  }
+
+
   if (
     name.includes("치킨") ||
     name.includes("닭튀김")
   ) {
 
     return "치킨";
-  }
-
-
-  if (
-    name.includes("돈가스") ||
-    name.includes("돈까스")
-  ) {
-
-    return "돈가스";
   }
 
 
@@ -753,6 +1489,26 @@ function getFoodFamily(
   ) {
 
     return "피자";
+  }
+
+
+  if (
+    name.includes("갈비찜") ||
+    name.includes("수육") ||
+    name.includes("보쌈") ||
+    name.includes("족발")
+  ) {
+
+    return "찜";
+  }
+
+
+  if (
+    name.includes("불고기") ||
+    name.includes("갈비")
+  ) {
+
+    return "구이";
   }
 
 
@@ -868,6 +1624,335 @@ function getFoodFamily(
 
 
 /* =========================================================
+   Food Family 적합도
+
+   완전히 같은 Family는 1.0,
+   같은 큰 음식군은 0.55~0.88,
+   관련성이 낮으면 0.0으로 봅니다.
+
+   예:
+   감자탕(탕) -> 갈비탕(탕)     1.00
+   감자탕(탕) -> 국밥           0.88
+   감자탕(탕) -> 감자밥(밥)     0.00
+
+   돈가스 -> 생선가스/치킨가스  높은 점수
+   제육덮밥 -> 불고기덮밥       1.00
+========================================================= */
+
+function getFamilyGroup(
+  family: string
+) {
+
+  if (
+    [
+      "볶음밥",
+      "비빔밥",
+      "덮밥",
+      "밥",
+      "김밥",
+    ].includes(
+      family
+    )
+  ) {
+    return "rice";
+  }
+
+
+  if (
+    [
+      "라면",
+      "냉면",
+      "우동",
+      "칼국수",
+      "면류",
+      "국수",
+    ].includes(
+      family
+    )
+  ) {
+    return "noodle";
+  }
+
+
+  if (
+    [
+      "찌개",
+      "전골",
+      "국",
+      "탕",
+      "국밥",
+    ].includes(
+      family
+    )
+  ) {
+    return "soup";
+  }
+
+
+  if (
+    [
+      "돈가스",
+      "튀김",
+      "치킨",
+    ].includes(
+      family
+    )
+  ) {
+    return "fried";
+  }
+
+
+  if (
+    [
+      "구이",
+      "볶음",
+      "조림",
+      "찜",
+    ].includes(
+      family
+    )
+  ) {
+    return "meat";
+  }
+
+
+  if (
+    family === "초밥"
+  ) {
+    return "sushi";
+  }
+
+
+  if (
+    [
+      "떡",
+      "전",
+      "무침",
+    ].includes(
+      family
+    )
+  ) {
+    return "snack";
+  }
+
+
+  return "other";
+}
+
+
+function getFamilyAffinity(
+  anchorFamily: string,
+  candidateFamily: string
+) {
+
+  if (
+    anchorFamily ===
+    candidateFamily
+  ) {
+    return 1.0;
+  }
+
+
+  const anchorGroup =
+    getFamilyGroup(
+      anchorFamily
+    );
+
+  const candidateGroup =
+    getFamilyGroup(
+      candidateFamily
+    );
+
+
+  if (
+    anchorGroup ===
+      "other" ||
+    candidateGroup ===
+      "other"
+  ) {
+    return 0;
+  }
+
+
+  if (
+    anchorGroup ===
+    candidateGroup
+  ) {
+
+    /*
+     * 밥류는 이름만 같은 "밥"이라고 해서
+     * 식사 경험이 모두 비슷하지 않습니다.
+     *
+     * 특히 제육덮밥 -> 쌀밥 같은 추천은
+     * 최애 슬롯에 들어오지 않도록 낮게 둡니다.
+     */
+    if (
+      anchorGroup ===
+      "rice"
+    ) {
+
+      const pair =
+        new Set([
+          anchorFamily,
+          candidateFamily,
+        ]);
+
+
+      if (
+        pair.has(
+          "덮밥"
+        ) &&
+        pair.has(
+          "볶음밥"
+        )
+      ) {
+        return 0.68;
+      }
+
+
+      if (
+        pair.has(
+          "덮밥"
+        ) &&
+        pair.has(
+          "비빔밥"
+        )
+      ) {
+        return 0.65;
+      }
+
+
+      if (
+        pair.has(
+          "볶음밥"
+        ) &&
+        pair.has(
+          "비빔밥"
+        )
+      ) {
+        return 0.62;
+      }
+
+
+      if (
+        pair.has(
+          "밥"
+        )
+      ) {
+        return 0.30;
+      }
+
+
+      if (
+        pair.has(
+          "김밥"
+        )
+      ) {
+        return 0.35;
+      }
+
+
+      return 0.55;
+    }
+
+
+    switch (
+      anchorGroup
+    ) {
+
+      case "soup":
+        return 0.88;
+
+      case "noodle":
+        return 0.85;
+
+      case "fried":
+
+        if (
+          (
+            anchorFamily === "돈가스" &&
+            candidateFamily === "치킨"
+          ) ||
+          (
+            anchorFamily === "치킨" &&
+            candidateFamily === "돈가스"
+          )
+        ) {
+          return 0.45;
+        }
+
+        return 0.78;
+
+      case "meat":
+        return 0.62;
+
+      case "snack":
+        return 0.60;
+
+      default:
+        return 0.55;
+    }
+  }
+
+
+  /*
+   * 국밥은 밥 이름이지만 실제 식사 경험은
+   * 국/탕 계열과도 매우 가깝습니다.
+   */
+  if (
+    (
+      anchorFamily === "국밥" &&
+      candidateGroup === "rice"
+    ) ||
+    (
+      candidateFamily === "국밥" &&
+      anchorGroup === "rice"
+    )
+  ) {
+    return 0.35;
+  }
+
+
+  /*
+   * 덮밥과 볶음밥은 같은 한 그릇 식사 계열이지만
+   * 완전히 같은 Family보다는 낮게 둡니다.
+   */
+  if (
+    (
+      anchorFamily === "덮밥" &&
+      candidateFamily === "볶음밥"
+    ) ||
+    (
+      anchorFamily === "볶음밥" &&
+      candidateFamily === "덮밥"
+    )
+  ) {
+    return 0.68;
+  }
+
+
+  /*
+   * 돈가스/튀김과 일부 치킨류
+   */
+  if (
+    (
+      anchorGroup === "fried" &&
+      candidateGroup === "meat"
+    ) ||
+    (
+      anchorGroup === "meat" &&
+      candidateGroup === "fried"
+    )
+  ) {
+    return 0.25;
+  }
+
+
+  return 0;
+}
+
+
+/* =========================================================
    실제 선호 음식 → Anchor
 ========================================================= */
 
@@ -963,31 +2048,87 @@ function makeCandidatePool(
       profileSimilarity;
 
 
+    let favoriteAnchorBoost =
+      0;
+
+
     if (
       anchors.length > 0
     ) {
 
       const anchorScores =
         anchors.map(
-          (anchor) => ({
+          (anchor) => {
 
-            name:
-              anchor.name,
-
-            similarity:
+            const similarity =
               dotProduct(
                 anchor.vector,
                 foodVector
-              ),
-          })
+              );
+
+
+            const anchorFamily =
+              getFoodFamily(
+                anchor.name,
+                null
+              );
+
+
+            const candidateFamily =
+              getFoodFamily(
+                food.name,
+                food.foodType
+              );
+
+
+            const familyAffinity =
+              getFamilyAffinity(
+                anchorFamily,
+                candidateFamily
+              );
+
+
+            const priorityScore =
+
+              similarity
+
+              +
+
+              familyAffinity *
+              ANCHOR_FAMILY_PRIORITY_BONUS
+
+              +
+
+              Math.max(
+                0,
+                anchor.weight - 1
+              ) *
+              FAVORITE_ANCHOR_PRIORITY_BONUS *
+              familyAffinity;
+
+
+            return {
+              name:
+                anchor.name,
+
+              weight:
+                anchor.weight,
+
+              similarity,
+
+              familyAffinity,
+
+              priorityScore,
+            };
+          }
         );
 
 
       const sorted =
         [...anchorScores].sort(
           (a, b) =>
-            b.similarity -
-            a.similarity
+            b.priorityScore -
+            a.priorityScore
         );
 
 
@@ -998,17 +2139,55 @@ function makeCandidatePool(
         sorted[0].similarity;
 
 
-      meanAnchorSimilarity =
+      const totalAnchorWeight =
         anchorScores.reduce(
           (
             sum,
             item
           ) =>
             sum +
-            item.similarity,
+            Math.max(
+              1,
+              item.weight
+            ),
           0
-        ) /
-        anchorScores.length;
+        );
+
+
+      meanAnchorSimilarity =
+        totalAnchorWeight > 0
+
+          ? anchorScores.reduce(
+              (
+                sum,
+                item
+              ) =>
+                sum +
+                item.similarity *
+                Math.max(
+                  1,
+                  item.weight
+                ),
+              0
+            ) /
+            totalAnchorWeight
+
+          : profileSimilarity;
+
+
+      favoriteAnchorBoost =
+
+        Math.max(
+          0,
+          sorted[0].weight - 1
+        ) *
+        FAVORITE_BASE_SCORE_BONUS *
+        sorted[0].familyAffinity
+
+        +
+
+        sorted[0].familyAffinity *
+        ANCHOR_FAMILY_BASE_BONUS;
     }
 
 
@@ -1025,7 +2204,11 @@ function makeCandidatePool(
       +
 
       MEAN_ANCHOR_WEIGHT *
-      meanAnchorSimilarity;
+      meanAnchorSimilarity
+
+      +
+
+      favoriteAnchorBoost;
 
 
     candidates.push({
@@ -1162,97 +2345,244 @@ function rerankWithMmr(
 
 
   /* -------------------------------------------------------
-     실제 메뉴 취향별 1개 우선 확보
+     최애 메뉴 기반 슬롯 우선 확보
+
+     모든 선호 메뉴를 순서대로 하나씩 선점하지 않고,
+     weight > 1인 최애 메뉴만 먼저 일부 슬롯을 확보합니다.
+     나머지는 아래 MMR에서 전체 취향 + 다양성으로 결정합니다.
   ------------------------------------------------------- */
 
-  for (
-    const anchor
-    of anchors
+  const favoriteAnchors =
+    [...anchors]
+      .filter(
+        (anchor) =>
+          anchor.weight > 1
+      )
+      .sort(
+        (a, b) =>
+          b.weight -
+          a.weight
+      );
+
+
+  const favoriteSlotLimit =
+    favoriteAnchors.length > 0
+
+      ? Math.min(
+          topK,
+
+          Math.max(
+            favoriteAnchors.length,
+
+            Math.ceil(
+              topK *
+              FAVORITE_SLOT_RATIO
+            )
+          )
+        )
+
+      : 0;
+
+
+  let favoriteRound =
+    0;
+
+
+  while (
+    favoriteAnchors.length > 0 &&
+    results.length <
+      favoriteSlotLimit
   ) {
 
-    const available =
-      remaining.filter(
-        (candidate) =>
-          candidate.bestAnchor
-          === anchor.name
+    let addedThisRound =
+      false;
+
+
+    for (
+      const anchor
+      of favoriteAnchors
+    ) {
+
+      if (
+        results.length >=
+        favoriteSlotLimit
+      ) {
+
+        break;
+      }
+
+
+      const anchorFamily =
+        getFoodFamily(
+          anchor.name,
+          null
+        );
+
+
+      const available =
+        remaining
+          .map(
+            (candidate) => {
+
+              const similarity =
+                dotProduct(
+                  anchor.vector,
+                  candidate.vector
+                );
+
+
+              const familyAffinity =
+                getFamilyAffinity(
+                  anchorFamily,
+                  candidate.family
+                );
+
+
+              return {
+                candidate,
+                similarity,
+                familyAffinity,
+              };
+            }
+          )
+          .filter(
+            (item) => {
+
+              const familyCount =
+                familyCounts.get(
+                  item.candidate.family
+                ) ?? 0;
+
+
+              return (
+                familyCount <
+                  MAX_PER_FAMILY &&
+
+                item.similarity >=
+                  FAVORITE_MIN_SIMILARITY &&
+
+                item.familyAffinity >=
+                  FAVORITE_MIN_FAMILY_AFFINITY
+              );
+            }
+          )
+          .sort(
+            (a, b) => {
+
+              const scoreA =
+                a.similarity *
+                  0.55 +
+                a.familyAffinity *
+                  0.30 +
+                a.candidate.baseScore *
+                  0.15;
+
+
+              const scoreB =
+                b.similarity *
+                  0.55 +
+                b.familyAffinity *
+                  0.30 +
+                b.candidate.baseScore *
+                  0.15;
+
+
+              return (
+                scoreB -
+                scoreA
+              );
+            }
+          );
+
+
+      if (
+        available.length === 0
+      ) {
+
+        continue;
+      }
+
+
+      const chosen =
+        available[0];
+
+
+      const selected:
+        RecommendationCandidate = {
+
+        ...chosen.candidate,
+
+        bestAnchor:
+          anchor.name,
+
+        anchorSimilarity:
+          chosen.similarity,
+
+        mmrScore:
+          chosen.candidate
+            .baseScore,
+      };
+
+
+      results.push(
+        selected
       );
 
 
-    if (
-      available.length === 0
-    ) {
+      familyCounts.set(
 
-      continue;
-    }
+        selected.family,
 
-
-    available.sort(
-      (a, b) =>
-        b.anchorSimilarity -
-        a.anchorSimilarity
-    );
-
-
-    const best = {
-      ...available[0],
-    };
-
-
-    const familyCount =
-      familyCounts.get(
-        best.family
-      ) ?? 0;
-
-
-    if (
-      familyCount
-      >= MAX_PER_FAMILY
-    ) {
-
-      continue;
-    }
-
-
-    best.mmrScore =
-      best.baseScore;
-
-
-    results.push(
-      best
-    );
-
-
-    familyCounts.set(
-      best.family,
-      familyCount + 1
-    );
-
-
-    anchorCounts.set(
-      anchor.name,
-
-      (
-        anchorCounts.get(
-          anchor.name
-        ) ?? 0
-      ) + 1
-    );
-
-
-    remaining =
-      remaining.filter(
-        (item) =>
-          item.id
-          !== best.id
+        (
+          familyCounts.get(
+            selected.family
+          ) ?? 0
+        ) + 1
       );
 
 
+      anchorCounts.set(
+
+        anchor.name,
+
+        (
+          anchorCounts.get(
+            anchor.name
+          ) ?? 0
+        ) + 1
+      );
+
+
+      remaining =
+        remaining.filter(
+          (item) =>
+            item.id !==
+            selected.id
+        );
+
+
+      addedThisRound =
+        true;
+    }
+
+
     if (
-      results.length
-      >= topK
+      !addedThisRound
     ) {
 
-      return results;
+      break;
+    }
+
+
+    favoriteRound++;
+
+
+    if (
+      favoriteRound >
+      topK
+    ) {
+
+      break;
     }
   }
 
@@ -1261,11 +2591,14 @@ function rerankWithMmr(
     anchors.length > 0
 
       ? Math.max(
-          3,
+          2,
 
           Math.ceil(
             topK /
-            anchors.length
+            Math.min(
+              anchors.length,
+              topK
+            )
           )
         )
 
@@ -1732,7 +3065,10 @@ async function buildUserRecommendations(
 
 function buildNaverSearchTerms(
   recommendations:
-    RecommendationCandidate[]
+    RecommendationCandidate[],
+
+  selectedFoods:
+    SelectedFood[]
 ) {
 
   /*
@@ -1794,8 +3130,108 @@ function buildNaverSearchTerms(
     new Set<string>();
 
 
+  /*
+   * 정확 메뉴 검색 총량은 기존과 동일하게
+   * 최대 NAVER_SEARCH_MENU_COUNT개로 유지합니다.
+   *
+   * 즉:
+   * 최애 3개 + AI 추천 5개 = 총 8개
+   *
+   * 외부 NAVER 요청 수를 늘리지 않으면서
+   * 사용자가 직접 ♥ 표시한 메뉴를 가장 먼저 검색합니다.
+   */
+  let exactSearchCount =
+    0;
+
+
   /* -------------------------------------------------------
-     1. 정확한 AI 추천 메뉴
+     1. ♥ 최애 메뉴 직접 검색
+
+     추천 후보 생성에서는 이미 선택한 음식 자체를 제외하지만,
+     "음식점 추천"에서는 사용자가 좋아한다고 직접 표시한
+     메뉴를 파는 식당도 반드시 후보가 되어야 합니다.
+
+     예:
+     ♥ 감자탕 -> 주변 감자탕집 직접 검색
+     ♥ 돈가스 -> 주변 돈가스집 직접 검색
+     ♥ 제육덮밥 -> 주변 제육덮밥집 직접 검색
+  ------------------------------------------------------- */
+
+  const favoriteFoods =
+    [...selectedFoods]
+      .filter(
+        (food) =>
+          food.weight > 1
+      )
+      .sort(
+        (a, b) =>
+          b.weight -
+          a.weight
+      );
+
+
+  for (
+    const food
+    of favoriteFoods
+  ) {
+
+    const query =
+      food.name.trim();
+
+
+    if (
+      !query ||
+      seenQueries.has(
+        query
+      )
+    ) {
+
+      continue;
+    }
+
+
+    seenQueries.add(
+      query
+    );
+
+
+    result.push({
+      name:
+        query,
+
+      sourceMenu:
+        food.name,
+
+      /*
+       * 사용자가 직접 최애로 지정한 메뉴이므로
+       * 가장 높은 취향 신호로 취급합니다.
+       */
+      score:
+        100,
+
+      kind:
+        "favorite",
+    });
+
+
+    exactSearchCount++;
+
+
+    if (
+      exactSearchCount >=
+      NAVER_SEARCH_MENU_COUNT
+    ) {
+
+      break;
+    }
+  }
+
+
+  /* -------------------------------------------------------
+     2. 정확한 AI 추천 메뉴
+
+     최애 검색 후 남은 슬롯만 사용합니다.
+     예: 최애 3개면 AI 추천 메뉴는 최대 5개.
   ------------------------------------------------------- */
 
   for (
@@ -1835,14 +3271,11 @@ function buildNaverSearchTerms(
     });
 
 
-    const exactMenuCount =
-      result.filter(
-        (term) =>
-          term.kind === "menu"
-      ).length;
+    exactSearchCount++;
+
 
     if (
-      exactMenuCount >=
+      exactSearchCount >=
       NAVER_SEARCH_MENU_COUNT
     ) {
 
@@ -1852,7 +3285,7 @@ function buildNaverSearchTerms(
 
 
   /* -------------------------------------------------------
-     2. 메뉴 family 확장 검색
+     3. 메뉴 family 확장 검색
 
      family 검색은 정확 메뉴보다 범위가 넓으므로
      적합도 점수를 소폭 낮춰 과대평가를 방지합니다.
@@ -2115,6 +3548,647 @@ function parseNaverCoordinate(
 
 
 /* =========================================================
+   영업시간 계산
+========================================================= */
+
+const KOREA_TIME_ZONE =
+  "Asia/Seoul";
+
+
+function getKoreaDayAndMinutes(
+  now = new Date()
+) {
+
+  const parts =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone:
+          KOREA_TIME_ZONE,
+
+        weekday:
+          "short",
+
+        hour:
+          "2-digit",
+
+        minute:
+          "2-digit",
+
+        hourCycle:
+          "h23",
+      }
+    ).formatToParts(
+      now
+    );
+
+
+  const weekday =
+    parts.find(
+      (part) =>
+        part.type ===
+        "weekday"
+    )?.value ?? "Sun";
+
+
+  const hour =
+    Number(
+      parts.find(
+        (part) =>
+          part.type ===
+          "hour"
+      )?.value ?? "0"
+    );
+
+
+  const minute =
+    Number(
+      parts.find(
+        (part) =>
+          part.type ===
+          "minute"
+      )?.value ?? "0"
+    );
+
+
+  const dayMap:
+    Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    };
+
+
+  return {
+    dayOfWeek:
+      dayMap[
+        weekday
+      ] ?? 0,
+
+    minutes:
+      hour * 60 +
+      minute,
+  };
+}
+
+
+function parseClockMinutes(
+  value: string | null
+) {
+
+  if (!value) {
+    return null;
+  }
+
+
+  const [
+    hourText,
+    minuteText,
+  ] =
+    value
+      .slice(
+        0,
+        5
+      )
+      .split(":");
+
+
+  const hour =
+    Number(
+      hourText
+    );
+
+  const minute =
+    Number(
+      minuteText
+    );
+
+
+  if (
+    !Number.isFinite(
+      hour
+    ) ||
+    !Number.isFinite(
+      minute
+    )
+  ) {
+
+    return null;
+  }
+
+
+  return (
+    hour * 60 +
+    minute
+  );
+}
+
+
+function isWithinTimeRange(
+  currentMinutes: number,
+  startMinutes: number,
+  endMinutes: number
+) {
+
+  /*
+   * 11:00 ~ 22:00
+   */
+  if (
+    endMinutes >
+    startMinutes
+  ) {
+
+    return (
+      currentMinutes >=
+        startMinutes &&
+      currentMinutes <
+        endMinutes
+    );
+  }
+
+
+  /*
+   * 18:00 ~ 02:00 같은 익일 영업
+   */
+  if (
+    endMinutes <
+    startMinutes
+  ) {
+
+    return (
+      currentMinutes >=
+        startMinutes ||
+      currentMinutes <
+        endMinutes
+    );
+  }
+
+
+  /*
+   * start === end는
+   * 24시간 영업으로 취급합니다.
+   */
+  return true;
+}
+
+
+function unknownBusinessHours():
+  BusinessHoursInfo {
+
+  return {
+    status:
+      "UNKNOWN",
+
+    label:
+      "영업시간 정보 없음",
+
+    detail:
+      null,
+
+    todayOpen:
+      null,
+
+    todayClose:
+      null,
+
+    breakStart:
+      null,
+
+    breakEnd:
+      null,
+
+    nextOpenText:
+      null,
+
+    source:
+      null,
+
+    verifiedAt:
+      null,
+  };
+}
+
+
+function makeBusinessHoursInfo(
+  row: RawBusinessHoursRow | undefined,
+  currentMinutes: number
+):
+  BusinessHoursInfo {
+
+  if (!row) {
+    return unknownBusinessHours();
+  }
+
+
+  const verifiedAt =
+    row.verified_at
+
+      ? new Date(
+          row.verified_at
+        ).toISOString()
+
+      : null;
+
+
+  if (
+    row.is_closed
+  ) {
+
+    return {
+      status:
+        "CLOSED_TODAY",
+
+      label:
+        "오늘 휴무",
+
+      detail:
+        "오늘은 운영하지 않아요",
+
+      todayOpen:
+        null,
+
+      todayClose:
+        null,
+
+      breakStart:
+        null,
+
+      breakEnd:
+        null,
+
+      nextOpenText:
+        null,
+
+      source:
+        row.source,
+
+      verifiedAt,
+    };
+  }
+
+
+  const openMinutes =
+    parseClockMinutes(
+      row.open_time
+    );
+
+  const closeMinutes =
+    parseClockMinutes(
+      row.close_time
+    );
+
+
+  if (
+    openMinutes === null ||
+    closeMinutes === null
+  ) {
+
+    return unknownBusinessHours();
+  }
+
+
+  const breakStartMinutes =
+    parseClockMinutes(
+      row.break_start_time
+    );
+
+  const breakEndMinutes =
+    parseClockMinutes(
+      row.break_end_time
+    );
+
+
+  if (
+    breakStartMinutes !== null &&
+    breakEndMinutes !== null &&
+    isWithinTimeRange(
+      currentMinutes,
+      breakStartMinutes,
+      breakEndMinutes
+    )
+  ) {
+
+    return {
+      status:
+        "BREAK",
+
+      label:
+        "브레이크타임",
+
+      detail:
+        `${row.break_start_time} ~ ${row.break_end_time}`,
+
+      todayOpen:
+        row.open_time,
+
+      todayClose:
+        row.close_time,
+
+      breakStart:
+        row.break_start_time,
+
+      breakEnd:
+        row.break_end_time,
+
+      nextOpenText:
+        `${row.break_end_time}부터 영업`,
+
+      source:
+        row.source,
+
+      verifiedAt,
+    };
+  }
+
+
+  const isOpen =
+    isWithinTimeRange(
+      currentMinutes,
+      openMinutes,
+      closeMinutes
+    );
+
+
+  if (
+    isOpen
+  ) {
+
+    return {
+      status:
+        "OPEN",
+
+      label:
+        "영업중",
+
+      detail:
+        `${row.open_time} ~ ${row.close_time}`,
+
+      todayOpen:
+        row.open_time,
+
+      todayClose:
+        row.close_time,
+
+      breakStart:
+        row.break_start_time,
+
+      breakEnd:
+        row.break_end_time,
+
+      nextOpenText:
+        null,
+
+      source:
+        row.source,
+
+      verifiedAt,
+    };
+  }
+
+
+  /*
+   * 아직 오늘 영업 시작 전인지,
+   * 영업이 끝난 뒤인지 구분합니다.
+   *
+   * 익일 영업(예: 18:00~02:00)은
+   * 위 isWithinTimeRange에서 이미 처리됩니다.
+   */
+  const beforeOpen =
+    closeMinutes >
+      openMinutes &&
+    currentMinutes <
+      openMinutes;
+
+
+  return {
+    status:
+      "CLOSED",
+
+    label:
+      beforeOpen
+        ? "영업 전"
+        : "영업종료",
+
+    detail:
+      `${row.open_time} ~ ${row.close_time} 운영`,
+
+    todayOpen:
+      row.open_time,
+
+    todayClose:
+      row.close_time,
+
+    breakStart:
+      row.break_start_time,
+
+    breakEnd:
+      row.break_end_time,
+
+    nextOpenText:
+      beforeOpen
+        ? `${row.open_time}부터 영업`
+        : null,
+
+    source:
+      row.source,
+
+    verifiedAt,
+  };
+}
+
+
+async function attachBusinessHours(
+  restaurants:
+    Array<
+      RestaurantCore &
+      RestaurantPriceFields
+    >
+) {
+
+  if (
+    restaurants.length === 0
+  ) {
+
+    return [] as Restaurant[];
+  }
+
+
+  const {
+    dayOfWeek,
+    minutes:
+      currentMinutes,
+  } =
+    getKoreaDayAndMinutes();
+
+
+  const restaurantKeys =
+    restaurants.map(
+      (restaurant) =>
+        restaurant.id
+    );
+
+
+  let rows:
+    RawBusinessHoursRow[] = [];
+
+
+  try {
+
+    const keysJson =
+      JSON.stringify(
+        restaurantKeys
+      );
+
+
+    rows =
+      await prisma.$queryRaw<
+        RawBusinessHoursRow[]
+      >`
+        SELECT
+          rbh.restaurant_key,
+
+          rbh.day_of_week,
+
+          CASE
+            WHEN rbh.open_time
+              IS NULL
+            THEN NULL
+            ELSE to_char(
+              rbh.open_time,
+              'HH24:MI'
+            )
+          END
+            AS open_time,
+
+          CASE
+            WHEN rbh.close_time
+              IS NULL
+            THEN NULL
+            ELSE to_char(
+              rbh.close_time,
+              'HH24:MI'
+            )
+          END
+            AS close_time,
+
+          CASE
+            WHEN rbh.break_start_time
+              IS NULL
+            THEN NULL
+            ELSE to_char(
+              rbh.break_start_time,
+              'HH24:MI'
+            )
+          END
+            AS break_start_time,
+
+          CASE
+            WHEN rbh.break_end_time
+              IS NULL
+            THEN NULL
+            ELSE to_char(
+              rbh.break_end_time,
+              'HH24:MI'
+            )
+          END
+            AS break_end_time,
+
+          rbh.is_closed,
+
+          rbh.source,
+
+          rbh.verified_at
+
+        FROM restaurant_business_hours rbh
+
+        JOIN jsonb_array_elements_text(
+          ${keysJson}::jsonb
+        )
+          AS keys(
+            restaurant_key
+          )
+
+          ON keys.restaurant_key =
+             rbh.restaurant_key
+
+        WHERE
+          rbh.day_of_week =
+          ${dayOfWeek}
+      `;
+
+  } catch (error) {
+
+    /*
+     * 초기 개발 중 SQL을 아직 적용하지 않았거나
+     * 영업시간 테이블에 문제가 있어도
+     * 음식점 추천 전체가 실패하지 않게 합니다.
+     */
+    console.error(
+      "Business hours lookup error:",
+      error
+    );
+
+    rows = [];
+  }
+
+
+  const rowByRestaurant =
+    new Map<
+      string,
+      RawBusinessHoursRow
+    >(
+      rows.map(
+        (row) => [
+          row.restaurant_key,
+          row,
+        ]
+      )
+    );
+
+
+  return restaurants.map(
+    (restaurant) => {
+
+      const businessHours =
+        makeBusinessHoursInfo(
+          rowByRestaurant.get(
+            restaurant.id
+          ),
+          currentMinutes
+        );
+
+
+      /*
+       * CLOSED / BREAK / 휴무는 추천에서 제외합니다.
+       *
+       * UNKNOWN은 실제로 닫았다는 뜻이 아니므로
+       * 데이터 누락 때문에 정상 가게가 전부 사라지는 것을
+       * 막기 위해 v1에서는 추천 가능 상태로 둡니다.
+       */
+      const recommendationEligible =
+        businessHours.status ===
+          "OPEN" ||
+        businessHours.status ===
+          "UNKNOWN";
+
+
+      return {
+        ...restaurant,
+
+        businessHours,
+
+        recommendationEligible,
+      };
+    }
+  );
+}
+
+
+/* =========================================================
    GET
 ========================================================= */
 
@@ -2324,16 +4398,36 @@ export async function GET(
         });
 
 
-    const preferences =
-
-      parsePreferences(
-
+    const rawStoredPreferences:
+      string[] =
         storedPreferences.map(
           (item) =>
-            item.menu_type
-        )
+            String(
+              item.menu_type
+            )
+        );
 
+
+    const parsedStoredPreferences:
+      string[] =
+
+      parsePreferences(
+        rawStoredPreferences
       ) ?? [];
+
+
+    const preferences =
+
+      parsedStoredPreferences.length > 0
+
+        ? Array.from(
+            new Set([
+              ...rawStoredPreferences,
+              ...parsedStoredPreferences,
+            ])
+          )
+
+        : rawStoredPreferences;
 
 
     const normalizedPreferences =
@@ -2342,9 +4436,11 @@ export async function GET(
 
         new Set(
 
-          preferences.map(
-            normalizePreference
-          )
+          preferences
+            .map(
+              normalizePreference
+            )
+            .filter(Boolean)
         )
       );
 
@@ -2404,7 +4500,10 @@ export async function GET(
       searchTerms =
         buildNaverSearchTerms(
           aiResult
-            .recommendations
+            .recommendations,
+
+          aiResult
+            .selectedFoods
         );
     }
 
@@ -2750,6 +4849,40 @@ export async function GET(
         of localData.items ?? []
       ) {
 
+        if (
+          !isRelevantNaverResult(
+            item,
+            searchTerm
+          )
+        ) {
+
+          continue;
+        }
+
+
+        const menuCategoryRelevance =
+          getNaverMenuCategoryRelevance(
+            item,
+            searchTerm
+          );
+
+
+        if (
+          menuCategoryRelevance <
+          MIN_NAVER_MATCH_RELEVANCE
+        ) {
+
+          continue;
+        }
+
+
+        const adjustedSearchScore =
+          Math.round(
+            searchTerm.score *
+            menuCategoryRelevance
+          );
+
+
         const cleanTitle =
           stripHtml(
             item.title
@@ -2786,7 +4919,7 @@ export async function GET(
 
               Math.max(
                 oldScore,
-                searchTerm.score
+                adjustedSearchScore
               )
             );
 
@@ -2802,7 +4935,7 @@ export async function GET(
                 new Map([
                   [
                     searchTerm.sourceMenu,
-                    searchTerm.score,
+                    adjustedSearchScore,
                   ],
                 ]),
             }
@@ -2833,7 +4966,7 @@ export async function GET(
     ===================================================== */
 
     const restaurants:
-      Restaurant[] = [];
+      RestaurantCore[] = [];
 
 
     for (
@@ -2930,6 +5063,39 @@ export async function GET(
             .matchedTerms
             .entries()
         );
+
+
+      /*
+       * 음식점별 대표 추천 메뉴
+       *
+       * 검색어 family가 아니라 sourceMenu 기준으로
+       * 점수가 가장 높은 메뉴를 하나 선택합니다.
+       *
+       * 이 메뉴가 카드의 "추천 메뉴"가 되고,
+       * 가격 resolver도 정확히 이 메뉴 가격만 조회합니다.
+       */
+      const rankedMatchedEntries =
+        [...matchedEntries]
+          .sort(
+            (
+              a,
+              b
+            ) =>
+              b[1] -
+              a[1]
+          );
+
+
+      const recommendedMenuName =
+        rankedMatchedEntries[0]
+          ?.[0] ??
+        null;
+
+
+      const recommendedMenuScore =
+        rankedMatchedEntries[0]
+          ?.[1] ??
+        null;
 
 
       let preferenceScore =
@@ -3102,7 +5268,7 @@ export async function GET(
         distance,
 
         matchedPreferences:
-          matchedEntries.map(
+          rankedMatchedEntries.map(
             (
               [
                 name,
@@ -3110,6 +5276,10 @@ export async function GET(
             ) =>
               name
           ),
+
+        recommendedMenuName,
+
+        recommendedMenuScore,
 
         preferenceScore,
 
@@ -3127,7 +5297,7 @@ export async function GET(
        범위 밖 음식점을 fallback으로 다시 넣지 않습니다.
     ===================================================== */
 
-    const finalRestaurants =
+    const radiusFilteredRestaurants =
       restaurants.filter(
         (restaurant) =>
           restaurant.distance <=
@@ -3135,18 +5305,69 @@ export async function GET(
       );
 
 
+    /*
+     * 가격 resolver
+     *
+     * 1) 해당 음식점의 검증된 실제 메뉴 가격
+     * 2) 없으면 지역 평균가
+     *
+     * 실제 가격 + 지역 평균 비교가 가능한 경우:
+     * 추천점수 = 취향 50% + 가격 30% + 거리 20%
+     *
+     * 비교자료가 부족하면 기존:
+     * 취향 70% + 거리 30%
+     * 점수를 그대로 유지합니다.
+     */
+    const pricedRestaurants =
+      await attachRestaurantPrices(
+        radiusFilteredRestaurants,
+        area1,
+        area2
+      );
+
+
+    /*
+     * 영업시간 DB를 붙입니다.
+     *
+     * 추천 대상에서 제외되는 CLOSED/BREAK 가게도
+     * 응답에는 남겨 프론트에서 빨간색/주황색 상태로
+     * 별도 표시할 수 있게 합니다.
+     */
+    const finalRestaurants =
+      await attachBusinessHours(
+        pricedRestaurants
+      );
+
+
     /* =====================================================
        7. 기본 정렬
 
-       API 기본 순서는 종합 추천 점수 순입니다.
-       프론트의 메뉴선호도 탭에서는 이 배열 전체를 받아
-       preferenceScore 기준으로 다시 정렬합니다.
+       1) 추천 가능한 가게 우선
+       2) 종합 추천 점수 순
+
+       프론트에서도 추천 리스트에서는
+       recommendationEligible=false를 다시 제외합니다.
     ===================================================== */
 
     finalRestaurants.sort(
-      (a, b) =>
-        b.recommendScore -
-        a.recommendScore
+      (a, b) => {
+
+        if (
+          a.recommendationEligible !==
+          b.recommendationEligible
+        ) {
+
+          return a.recommendationEligible
+            ? -1
+            : 1;
+        }
+
+
+        return (
+          b.recommendScore -
+          a.recommendScore
+        );
+      }
     );
 
 
@@ -3216,6 +5437,19 @@ export async function GET(
 
                   anchor:
                     item.bestAnchor,
+
+                  anchorFamilyAffinity:
+                    item.bestAnchor
+                      ? Number(
+                          getFamilyAffinity(
+                            getFoodFamily(
+                              item.bestAnchor,
+                              null
+                            ),
+                            item.family
+                          ).toFixed(2)
+                        )
+                      : 0,
 
                   mmrScore:
                     item.mmrScore
