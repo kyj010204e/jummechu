@@ -326,35 +326,14 @@ export async function GET() {
             food.name
         );
 
-    const selectedCategoryIds =
-      getPreferenceCategoryIds(
-        selectedMenus
-      );
-
     return NextResponse.json({
-      /*
-       * v2/v3 새 응답
-       */
       selectedMenus,
       favoriteMenus,
-      selectedCategoryIds,
 
-      /*
-       * 기존 로그인/지도 코드 호환용.
-       *
-       * 예전 화면들은 data.preferences 길이로
-       * 온보딩 완료 여부를 검사하고 있으므로,
-       * 세부 메뉴 목록을 preferences 별칭으로도 내려줍니다.
-       *
-       * 최소 5개 세부 메뉴를 선택했다면
-       * 기존의 "3개 이상" 검사도 자연스럽게 통과합니다.
-       */
-      preferences:
-        selectedMenus,
-
-      hasPreferences:
-        selectedMenus.length >=
-        MIN_DETAIL_PREFERENCES,
+      selectedCategoryIds:
+        getPreferenceCategoryIds(
+          selectedMenus
+        ),
 
       minSelections:
         MIN_DETAIL_PREFERENCES,
@@ -466,7 +445,7 @@ export async function POST(
     }
 
     const allowedMenus =
-      new Set(
+      new Set<string>(
         ALL_PREFERENCE_MENU_NAMES
       );
 
@@ -706,59 +685,19 @@ export async function POST(
         .model_name;
 
     /*
-     * Prisma 7 환경에서 Prisma.sql helper가 런타임에
-     * 함수로 노출되지 않는 경우가 있으므로 사용하지 않습니다.
+     * 메뉴가 많아질 때도 안정적으로 저장되도록
+     * 1건씩 INSERT하지 않고 batch INSERT 합니다.
      *
-     * 대신 JSONB -> jsonb_to_recordset()으로
-     * 여러 행을 한 번에 INSERT 합니다.
-     *
-     * 이렇게 하면 30~80개 메뉴를 선택해도
-     * INSERT를 1건씩 반복하지 않아도 됩니다.
+     * 예: 39개 선택 시
+     * 기존: DELETE + 수십 번의 INSERT
+     * 변경: DELETE + 1번의 batch INSERT
      */
-
-    const categoryRowsJson =
-      JSON.stringify(
-        categoryIds.map(
-          (categoryId) => ({
-            user_id:
-              userId.toString(),
-
-            menu_type:
-              categoryId,
-          })
-        )
-      );
-
-
-    const foodRowsJson =
-      JSON.stringify(
-        selectedFoods.map(
-          (food) => ({
-            user_id:
-              userId.toString(),
-
-            food_id:
-              food.id.toString(),
-
-            weight:
-              favoriteMenuSet.has(
-                food.name
-              )
-                ? 2.0
-                : 1.0,
-
-            source:
-              "preference_ui",
-          })
-        )
-      );
-
-
     await prisma.$transaction(
       async (tx) => {
 
         /*
-         * 상위 카테고리 저장
+         * 상위 카테고리:
+         * UI / 분석 / fallback용
          */
         await tx.$executeRaw`
           DELETE FROM user_preferences
@@ -766,10 +705,10 @@ export async function POST(
         `;
 
 
-        if (
-          categoryIds.length > 0
+        for (
+          const categoryId
+          of categoryIds
         ) {
-
           await tx.$executeRaw`
             INSERT INTO user_preferences
             (
@@ -777,25 +716,18 @@ export async function POST(
               menu_type,
               created_at
             )
-
-            SELECT
-              data.user_id::bigint,
-              data.menu_type,
+            VALUES
+            (
+              ${userId},
+              ${categoryId},
               CURRENT_TIMESTAMP
-
-            FROM jsonb_to_recordset(
-              ${categoryRowsJson}::jsonb
-            )
-            AS data(
-              user_id text,
-              menu_type text
             )
           `;
         }
 
 
         /*
-         * 실제 상세 메뉴 취향 저장
+         * 실제 상세 메뉴 취향
          */
         await tx.$executeRaw`
           DELETE FROM user_food_preferences
@@ -803,9 +735,16 @@ export async function POST(
         `;
 
 
-        if (
-          selectedFoods.length > 0
+        for (
+          const food
+          of selectedFoods
         ) {
+          const weight =
+            favoriteMenuSet.has(
+              food.name
+            )
+              ? 2.0
+              : 1.0;
 
           await tx.$executeRaw`
             INSERT INTO user_food_preferences
@@ -816,29 +755,21 @@ export async function POST(
               source,
               created_at
             )
-
-            SELECT
-              data.user_id::bigint,
-              data.food_id::bigint,
-              data.weight::double precision,
-              data.source,
+            VALUES
+            (
+              ${userId},
+              ${food.id},
+              ${weight},
+              'preference_ui',
               CURRENT_TIMESTAMP
-
-            FROM jsonb_to_recordset(
-              ${foodRowsJson}::jsonb
-            )
-            AS data(
-              user_id text,
-              food_id text,
-              weight double precision,
-              source text
             )
           `;
         }
 
 
         /*
-         * 사용자 취향 embedding 갱신
+         * 추천 API에서 즉시 새 취향을 쓰도록
+         * user_taste_embeddings까지 같은 요청에서 갱신
          */
         await tx.$executeRaw`
           INSERT INTO user_taste_embeddings
@@ -851,7 +782,6 @@ export async function POST(
             created_at,
             updated_at
           )
-
           VALUES
           (
             ${userId},
@@ -863,36 +793,26 @@ export async function POST(
             CURRENT_TIMESTAMP,
             CURRENT_TIMESTAMP
           )
-
           ON CONFLICT
             (user_id)
-
           DO UPDATE SET
             embedding =
               EXCLUDED.embedding,
-
             embedding_dim =
               EXCLUDED.embedding_dim,
-
             model_name =
               EXCLUDED.model_name,
-
             preference_count =
               EXCLUDED.preference_count,
-
             updated_at =
               CURRENT_TIMESTAMP
         `;
       },
       {
-        maxWait:
-          10_000,
-
-        timeout:
-          30_000,
+        maxWait: 10_000,
+        timeout: 30_000,
       }
     );
-
 
     return NextResponse.json({
       message:
@@ -903,16 +823,6 @@ export async function POST(
 
       selectedCategoryIds:
         categoryIds,
-
-      /*
-       * 기존 클라이언트 호환용
-       */
-      preferences:
-        selectedMenus,
-
-      hasPreferences:
-        selectedMenus.length >=
-        MIN_DETAIL_PREFERENCES,
 
       preferenceCount:
         selectedMenus.length,

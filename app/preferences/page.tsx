@@ -16,6 +16,13 @@ import {
   PREFERENCE_CATEGORIES,
 } from "@/lib/preference-catalog";
 
+import {
+  AppHeader,
+  AppShell,
+  PageIntro,
+  SectionHeader,
+} from "@/components/JummechuUI";
+
 
 type PreferenceResponse = {
   message?: string;
@@ -598,117 +605,72 @@ export default function PreferencesPage() {
   ) {
 
     return (
-      <main className="min-h-screen bg-[#faf8f5] px-5 py-7">
+      <AppShell>
+        <AppHeader
+          eyebrow="PREFERENCE"
+          title="취향 설정"
+          onBack={() => router.back()}
+        />
 
-        <div className="mx-auto w-full max-w-md">
-
-          <div className="h-8 w-8 rounded-full bg-gray-100" />
-
-          <div className="mt-12 h-4 w-28 animate-pulse rounded-full bg-orange-100" />
-
+        <div className="px-4 pb-24 pt-5">
+          <div className="h-4 w-28 animate-pulse rounded-full bg-orange-100" />
           <div className="mt-4 h-9 w-72 animate-pulse rounded-xl bg-gray-200" />
-
           <div className="mt-3 h-5 w-60 animate-pulse rounded-lg bg-gray-100" />
 
           <div className="mt-8 grid grid-cols-2 gap-3">
-
-            {Array.from({
-              length: 8,
-            }).map(
-              (
-                _,
-                index
-              ) => (
-                <div
-                  key={
-                    index
-                  }
-                  className="h-28 animate-pulse rounded-3xl bg-white shadow-sm"
-                />
-              )
-            )}
-
+            {Array.from({ length: 8 }).map((_, index) => (
+              <div
+                key={index}
+                className="h-28 animate-pulse rounded-3xl border border-gray-100 bg-white shadow-sm"
+              />
+            ))}
           </div>
-
         </div>
-
-      </main>
+      </AppShell>
     );
   }
 
 
   return (
-    <main className="min-h-screen bg-[#faf8f5] px-5 py-7">
+    <AppShell>
+      <AppHeader
+        eyebrow="PREFERENCE"
+        title="취향 설정"
+        onBack={() => router.back()}
+        right={
+          <span className="rounded-full bg-orange-50 px-2.5 py-1 text-[11px] font-extrabold text-orange-500">
+            {selectedMenus.length}개
+          </span>
+        }
+      />
 
-      <div className="mx-auto w-full max-w-md pb-32">
-
-        {/* 상단 */}
-        <header className="flex items-center justify-between">
-
-          <button
-            type="button"
-            onClick={() =>
-              router.back()
-            }
-            className="flex h-9 w-9 items-center justify-center rounded-full text-2xl text-gray-700 transition hover:bg-white"
-            aria-label="뒤로가기"
-          >
-            ‹
-          </button>
-
-
-          <div className="rounded-full bg-orange-50 px-3 py-1.5 text-xs font-bold text-orange-500">
-            {selectedMenus.length}개 선택
-          </div>
-
-        </header>
-
-
-        {/* 제목 */}
-        <section className="mt-10">
-
-          <p className="text-sm font-extrabold text-orange-500">
-            점메추 취향 설정
-          </p>
-
-          <h1 className="mt-3 text-[28px] font-extrabold leading-tight tracking-tight text-gray-950">
-            어떤 메뉴를
-            <br />
-            좋아하세요?
-          </h1>
-
-          <p className="mt-4 text-sm leading-6 text-gray-500">
-            먼저 음식 종류를 고르고,
-            <br />
-            좋아하는 세부 메뉴를 {MIN_DETAIL_PREFERENCES}개 이상 선택해주세요.
-          </p>
-
-        </section>
+      <div className="px-4 pb-32 pt-5">
+        <PageIntro
+          eyebrow="TASTE PROFILE"
+          title="어떤 메뉴를 좋아하세요?"
+          description={
+            <>
+              음식 종류를 고르고 좋아하는 세부 메뉴를 {MIN_DETAIL_PREFERENCES}개 이상 선택해주세요.
+            </>
+          }
+        />
 
 
         {/* 카테고리 */}
         <section className="mt-8">
 
-          <div className="mb-3 flex items-end justify-between">
-
-            <div>
-              <p className="text-xs font-extrabold text-gray-800">
-                1. 음식 종류 선택
-              </p>
-
-              <p className="mt-1 text-[11px] text-gray-400">
-                누르면 아래에 세부 메뉴가 열려요.
-              </p>
-            </div>
-
-            <span className="text-[11px] font-semibold text-gray-400">
-              {selectedCategoryIds.length}개 카테고리
-            </span>
-
-          </div>
+          <SectionHeader
+            title="1. 음식 종류 선택"
+            subtitle="카테고리를 누르면 아래에 세부 메뉴가 열려요."
+            right={
+              <span className="text-[11px] font-semibold text-gray-400">
+                {selectedCategoryIds.length}개 카테고리
+              </span>
+            }
+          />
 
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="mt-3 grid grid-cols-2 gap-3">
 
             {PREFERENCE_CATEGORIES.map(
               (
@@ -746,10 +708,10 @@ export default function PreferencesPage() {
                     }
                     className={`relative min-h-[112px] rounded-3xl border p-4 text-left transition ${
                       active
-                        ? "border-orange-500 bg-orange-50 shadow-md ring-2 ring-orange-100"
+                        ? "border-orange-400 bg-orange-50 shadow-sm ring-4 ring-orange-50"
                         : hasSelection
                           ? "border-orange-200 bg-white shadow-sm"
-                          : "border-gray-100 bg-white shadow-sm hover:border-orange-200"
+                          : "border-gray-100 bg-white shadow-sm hover:border-orange-200 hover:bg-orange-50/30"
                     }`}
                   >
 
@@ -802,7 +764,7 @@ export default function PreferencesPage() {
 
 
         {/* 세부 메뉴 */}
-        <section className="mt-5 rounded-[28px] border border-orange-100 bg-white p-5 shadow-sm">
+        <section className="mt-5 rounded-3xl border border-orange-100 bg-orange-50/40 p-5">
 
           <div className="flex items-start justify-between gap-3">
 
@@ -917,7 +879,7 @@ export default function PreferencesPage() {
 
 
         {/* 현재 선택 */}
-        <section className="mt-5 rounded-3xl bg-white p-5 shadow-sm">
+        <section className="mt-5 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm">
 
           <div className="flex items-center justify-between">
 
@@ -1096,7 +1058,7 @@ export default function PreferencesPage() {
         {/* 하단 저장 */}
         <div className="fixed inset-x-0 bottom-0 z-30">
 
-          <div className="mx-auto w-full max-w-md border-t border-gray-100 bg-[#faf8f5]/95 px-5 pb-5 pt-3 backdrop-blur">
+          <div className="mx-auto w-full max-w-md border-t border-gray-100 bg-white/95 px-4 pb-5 pt-3 backdrop-blur">
 
             {error && (
               <div className="mb-2 rounded-2xl bg-red-50 px-4 py-2.5 text-center text-xs font-semibold text-red-500 shadow-sm">
@@ -1125,6 +1087,6 @@ export default function PreferencesPage() {
 
       </div>
 
-    </main>
+    </AppShell>
   );
 }

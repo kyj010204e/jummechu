@@ -4,6 +4,7 @@ import Script from "next/script";
 import { parseCoordinate } from "@/lib/validation";
 import {
   FormEvent,
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -75,6 +76,14 @@ type Restaurant = {
   id: string;
   name: string;
   category: string;
+
+  /*
+   * 서버의 음식점/술집 분류.
+   * 일부 오래된 응답에도 안전하게 동작하도록 optional로 둡니다.
+   */
+  venueType?: "restaurant" | "bar";
+  venueTypeLabel?: "음식점" | "술집";
+
   address: string;
   roadAddress: string;
 
@@ -114,17 +123,17 @@ type Restaurant = {
 
   priceSourceLabel: string;
 
-  priceScore: number;
-
-  valueScore: number;
-
-  priceComparedToRegionalPercent:
-    number | null;
-
-  priceComparable: boolean;
-
   businessHours: BusinessHoursInfo;
   recommendationEligible: boolean;
+
+  /*
+   * 주차 정보는 아직 데이터가 없는 식당이 많을 수 있으므로
+   * null/undefined를 "미확인"으로 취급합니다.
+   * 추후 restaurant_facilities 같은 DB 소스를 연결하면
+   * 개인설정의 주차 필터가 그대로 동작합니다.
+   */
+  parkingAvailable?: boolean | null;
+  parkingSourceLabel?: string | null;
 };
 
 type RecommendedMenu = {
@@ -160,20 +169,134 @@ type RestaurantResponse = {
 
 type Mode =
   | "recommend"
-  | "value"
-  | "preference";
+  | "settings";
 
-type PreferenceRadiusKm = 1 | 2 | 3 | 4 | 5;
+/* =========================================================
+   API 응답 안전 보정
+
+   음식점 검색 API가 일부 부가 필드(영업시간/가격 등)를
+   내려주지 못해도 지도 화면 전체가 죽지 않도록 기본값을 채웁니다.
+========================================================= */
+const UNKNOWN_BUSINESS_HOURS: BusinessHoursInfo = {
+  status: "UNKNOWN",
+  label: "영업시간 미확인",
+  detail: null,
+  todayOpen: null,
+  todayClose: null,
+  breakStart: null,
+  breakEnd: null,
+  nextOpenText: null,
+  source: null,
+  verifiedAt: null,
+};
+
+function normalizeRestaurant(
+  restaurant: Restaurant
+): Restaurant {
+  const businessHours =
+    restaurant.businessHours ??
+    UNKNOWN_BUSINESS_HOURS;
+
+  return {
+    ...restaurant,
+
+    matchedPreferences:
+      Array.isArray(restaurant.matchedPreferences)
+        ? restaurant.matchedPreferences
+        : [],
+
+    recommendedMenuName:
+      restaurant.recommendedMenuName ?? null,
+
+    recommendedMenuScore:
+      restaurant.recommendedMenuScore ?? null,
+
+    priceMenuName:
+      restaurant.priceMenuName ?? null,
+
+    priceKrw:
+      restaurant.priceKrw ?? null,
+
+    directPriceKrw:
+      restaurant.directPriceKrw ?? null,
+
+    regionalAveragePriceKrw:
+      restaurant.regionalAveragePriceKrw ?? null,
+
+    restaurantMenuPriceId:
+      restaurant.restaurantMenuPriceId ?? null,
+
+    priceSource:
+      restaurant.priceSource ?? "unknown",
+
+    priceSourceLabel:
+      restaurant.priceSourceLabel ?? "가격 미확인",
+
+    businessHours: {
+      ...UNKNOWN_BUSINESS_HOURS,
+      ...businessHours,
+    },
+
+    /*
+     * false가 명시된 경우만 추천 제외.
+     * 필드 자체가 누락된 오래된/간소화 API 응답은
+     * UNKNOWN 영업시간으로 간주하고 추천 후보에는 유지합니다.
+     */
+    recommendationEligible:
+      restaurant.recommendationEligible !== false,
+
+    parkingAvailable:
+      restaurant.parkingAvailable ?? null,
+
+    parkingSourceLabel:
+      restaurant.parkingSourceLabel ?? null,
+  };
+}
 
 /*
- * 음식점 API에서는 최대 5km까지 후보를 받아오고,
- * 메뉴선호도 탭에서 사용자가 1~5km 범위를 선택하면
- * 프론트에서 해당 반경 안의 음식점만 필터링합니다.
- *
- * 거리는 메뉴선호도 점수에는 섞지 않고
- * 검색 범위 제한 용도로만 사용합니다.
+ * 음식점 API에서는 최대 5km 후보를 받아옵니다.
+ * 실제 추천 순서는 사용자가 정한
+ * 메뉴 취향 / 거리 가중치로 프론트에서 다시 계산합니다.
  */
 const MAX_RESTAURANT_SEARCH_RADIUS_KM = 5;
+
+const RECOMMENDATION_SETTINGS_KEY =
+  "jummechu_recommendation_settings_v1";
+
+const RESTAURANT_REFRESH_COOLDOWN_SECONDS = 10;
+
+
+function calculateWeightedRecommendScore(
+  restaurant: Restaurant,
+  preferenceWeight: number
+) {
+  const safePreferenceWeight =
+    Math.min(
+      100,
+      Math.max(
+        0,
+        preferenceWeight
+      )
+    );
+
+  const distanceWeight =
+    100 -
+    safePreferenceWeight;
+
+  return Math.round(
+    restaurant.preferenceScore *
+      (
+        safePreferenceWeight /
+        100
+      )
+    +
+    restaurant.distanceScore *
+      (
+        distanceWeight /
+        100
+      )
+  );
+}
 
 /* =========================================================
    NAVER MAP 타입
@@ -329,10 +452,84 @@ export default function MapPage() {
   const [mode, setMode] =
     useState<Mode>("recommend");
 
+  /*
+   * 받은 친구 요청 개수
+   *
+   * 지도 화면에 머무는 동안 새 요청을 놓치지 않도록
+   * 최초 진입 / 창 포커스 / 15초 간격으로 갱신합니다.
+   */
   const [
-    preferenceRadiusKm,
-    setPreferenceRadiusKm,
-  ] = useState<PreferenceRadiusKm>(3);
+    incomingFriendRequestCount,
+    setIncomingFriendRequestCount,
+  ] = useState(0);
+
+  /*
+   * 추천 가중치
+   *
+   * 사용자가 "메뉴 취향" 비율을 움직이면
+   * 거리 비율은 자동으로 100 - 메뉴 취향이 됩니다.
+   *
+   * 기본값은 기존 점메추 추천과 동일한
+   * 메뉴 취향 70% + 거리 30%입니다.
+   */
+  const [
+    preferenceWeight,
+    setPreferenceWeight,
+  ] = useState(70);
+
+  const distanceWeight =
+    100 -
+    preferenceWeight;
+
+  /*
+   * 개인설정 - 예산
+   *
+   * 예산은 점수에 섞지 않고 hard filter로만 사용합니다.
+   */
+  const [
+    budgetEnabled,
+    setBudgetEnabled,
+  ] = useState(false);
+
+  const [
+    budgetKrw,
+    setBudgetKrw,
+  ] = useState(20_000);
+
+  const [
+    includeUnknownPrice,
+    setIncludeUnknownPrice,
+  ] = useState(true);
+
+  /*
+   * 개인설정 - 주차
+   *
+   * 주차 정보가 아직 없는 식당이 많을 수 있으므로
+   * "미확인 식당 포함"을 기본값으로 둡니다.
+   */
+  const [
+    parkingRequired,
+    setParkingRequired,
+  ] = useState(false);
+
+  const [
+    includeUnknownParking,
+    setIncludeUnknownParking,
+  ] = useState(true);
+
+  /*
+   * 점심/식사 추천에서는 술집을 기본 제외합니다.
+   * 개인설정에서 사용자가 원할 때만 별도 구역으로 보여줍니다.
+   */
+  const [
+    includeBars,
+    setIncludeBars,
+  ] = useState(false);
+
+  const [
+    recommendationSettingsLoaded,
+    setRecommendationSettingsLoaded,
+  ] = useState(false);
 
   const [mapLoaded, setMapLoaded] =
     useState(false);
@@ -379,6 +576,11 @@ export default function MapPage() {
   const [
     restaurantRefreshKey,
     setRestaurantRefreshKey,
+  ] = useState(0);
+
+  const [
+    restaurantRefreshCooldown,
+    setRestaurantRefreshCooldown,
   ] = useState(0);
 
   const [
@@ -437,26 +639,47 @@ export default function MapPage() {
   ] = useState("");
 
   /*
-   * 현재 선택한 메뉴선호도 반경 안에 있는 음식점 수
-   *
-   * restaurants 선언 이후에 계산해야
-   * "Cannot access 'restaurants' before initialization"
-   * ReferenceError가 발생하지 않습니다.
+   * 가격 제보
    */
-  const preferenceRestaurantCount =
-    useMemo(
-      () =>
-        restaurants.filter(
-          (restaurant) =>
-            restaurant.recommendationEligible &&
-            restaurant.distance <=
-              preferenceRadiusKm * 1000
-        ).length,
-      [
-        restaurants,
-        preferenceRadiusKm,
-      ]
-    );
+  const [
+    priceReportRestaurant,
+    setPriceReportRestaurant,
+  ] = useState<Restaurant | null>(null);
+
+  const [
+    showPriceReportModal,
+    setShowPriceReportModal,
+  ] = useState(false);
+
+  const [
+    priceReportMenu,
+    setPriceReportMenu,
+  ] = useState("");
+
+  const [
+    priceReportPrice,
+    setPriceReportPrice,
+  ] = useState("");
+
+  const [
+    priceReportNote,
+    setPriceReportNote,
+  ] = useState("");
+
+  const [
+    priceReportSaving,
+    setPriceReportSaving,
+  ] = useState(false);
+
+  const [
+    priceReportError,
+    setPriceReportError,
+  ] = useState("");
+
+  const [
+    priceReportSuccess,
+    setPriceReportSuccess,
+  ] = useState("");
 
   /*
    * 현재 선택된 음식점
@@ -503,6 +726,113 @@ export default function MapPage() {
     process.env.NEXT_PUBLIC_NAVER_MAP_CLIENT_ID;
 
   /* =======================================================
+     친구 요청 알림 배지
+  ======================================================= */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadFriendRequestCount() {
+      try {
+        const [
+          friendsResponse,
+          recommendationResponse,
+        ] = await Promise.all([
+          fetch(
+            "/api/friends",
+            {
+              cache: "no-store",
+            }
+          ),
+          fetch(
+            "/api/friend-recommendations",
+            {
+              cache: "no-store",
+            }
+          ),
+        ]);
+
+        if (
+          !friendsResponse.ok ||
+          !recommendationResponse.ok
+        ) {
+          return;
+        }
+
+        const friendsData =
+          (await friendsResponse.json()) as {
+            incomingRequests?: unknown[];
+          };
+
+        const recommendationData =
+          (await recommendationResponse.json()) as {
+            incomingRequests?: unknown[];
+          };
+
+        if (cancelled) {
+          return;
+        }
+
+        const friendRequestCount =
+          Array.isArray(
+            friendsData.incomingRequests
+          )
+            ? friendsData.incomingRequests.length
+            : 0;
+
+        const recommendationRequestCount =
+          Array.isArray(
+            recommendationData.incomingRequests
+          )
+            ? recommendationData.incomingRequests.length
+            : 0;
+
+        setIncomingFriendRequestCount(
+          friendRequestCount +
+          recommendationRequestCount
+        );
+      } catch {
+        /*
+         * 친구 알림 조회 실패가
+         * 지도 사용 자체를 막으면 안 되므로 조용히 무시합니다.
+         */
+      }
+    }
+
+    void loadFriendRequestCount();
+
+    const handleFocus = () => {
+      void loadFriendRequestCount();
+    };
+
+    window.addEventListener(
+      "focus",
+      handleFocus
+    );
+
+    const intervalId =
+      window.setInterval(
+        () => {
+          void loadFriendRequestCount();
+        },
+        15_000
+      );
+
+    return () => {
+      cancelled = true;
+
+      window.removeEventListener(
+        "focus",
+        handleFocus
+      );
+
+      window.clearInterval(
+        intervalId
+      );
+    };
+  }, []);
+
+  /* =======================================================
      1. 현재 위치 불러오기
   ======================================================= */
 
@@ -546,6 +876,164 @@ export default function MapPage() {
     void initializeMap();
     return () => controller.abort();
   }, [router, clientId]);
+
+  /*
+   * 추천 가중치 / 개인설정 불러오기
+   *
+   * 우선 브라우저에 저장합니다.
+   * 추후 계정 동기화 API를 추가해도 UI 구조는 그대로 사용할 수 있습니다.
+   */
+  useEffect(() => {
+    try {
+      const raw =
+        localStorage.getItem(
+          RECOMMENDATION_SETTINGS_KEY
+        );
+
+      if (raw) {
+        const parsed =
+          JSON.parse(
+            raw
+          ) as {
+            preferenceWeight?: unknown;
+            budgetEnabled?: unknown;
+            budgetKrw?: unknown;
+            includeUnknownPrice?: unknown;
+            parkingRequired?: unknown;
+            includeUnknownParking?: unknown;
+            includeBars?: unknown;
+          };
+
+        if (
+          typeof parsed.preferenceWeight ===
+            "number" &&
+          Number.isFinite(
+            parsed.preferenceWeight
+          )
+        ) {
+          setPreferenceWeight(
+            Math.min(
+              100,
+              Math.max(
+                0,
+                Math.round(
+                  parsed.preferenceWeight /
+                  10
+                ) *
+                  10
+              )
+            )
+          );
+        }
+
+        if (
+          typeof parsed.budgetEnabled ===
+          "boolean"
+        ) {
+          setBudgetEnabled(
+            parsed.budgetEnabled
+          );
+        }
+
+        if (
+          typeof parsed.budgetKrw ===
+            "number" &&
+          Number.isFinite(
+            parsed.budgetKrw
+          )
+        ) {
+          setBudgetKrw(
+            Math.min(
+              500_000,
+              Math.max(
+                1_000,
+                Math.round(
+                  parsed.budgetKrw
+                )
+              )
+            )
+          );
+        }
+
+        if (
+          typeof parsed.includeUnknownPrice ===
+          "boolean"
+        ) {
+          setIncludeUnknownPrice(
+            parsed.includeUnknownPrice
+          );
+        }
+
+        if (
+          typeof parsed.parkingRequired ===
+          "boolean"
+        ) {
+          setParkingRequired(
+            parsed.parkingRequired
+          );
+        }
+
+        if (
+          typeof parsed.includeUnknownParking ===
+          "boolean"
+        ) {
+          setIncludeUnknownParking(
+            parsed.includeUnknownParking
+          );
+        }
+
+        if (
+          typeof parsed.includeBars ===
+          "boolean"
+        ) {
+          setIncludeBars(
+            parsed.includeBars
+          );
+        }
+      }
+    } catch {
+      /*
+       * 잘못된 브라우저 저장값은 무시하고
+       * 기본 설정으로 계속 사용합니다.
+       */
+    } finally {
+      setRecommendationSettingsLoaded(
+        true
+      );
+    }
+  }, []);
+
+
+  useEffect(() => {
+    if (
+      !recommendationSettingsLoaded
+    ) {
+      return;
+    }
+
+    localStorage.setItem(
+      RECOMMENDATION_SETTINGS_KEY,
+      JSON.stringify({
+        preferenceWeight,
+        budgetEnabled,
+        budgetKrw,
+        includeUnknownPrice,
+        parkingRequired,
+        includeUnknownParking,
+        includeBars,
+      })
+    );
+  }, [
+    recommendationSettingsLoaded,
+    preferenceWeight,
+    budgetEnabled,
+    budgetKrw,
+    includeUnknownPrice,
+    parkingRequired,
+    includeUnknownParking,
+    includeBars,
+  ]);
+
 
   /* =======================================================
      2. NAVER MAP 인증 실패
@@ -666,6 +1154,46 @@ export default function MapPage() {
   ]);
 
   /* =======================================================
+     음식점 수동 새로고침 쿨다운
+
+     - 위치가 바뀌면 아래 음식점 API effect가 자동 재실행됩니다.
+     - 같은 위치에서 수동 새로고침은 10초에 한 번만 허용합니다.
+     - 서버에도 별도 rate limit이 있으므로 이 값은 UI 레벨의 1차 보호입니다.
+  ======================================================= */
+
+  useEffect(() => {
+    if (restaurantRefreshCooldown <= 0) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setRestaurantRefreshCooldown(
+        (current) => Math.max(0, current - 1)
+      );
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [restaurantRefreshCooldown]);
+
+  function refreshRestaurants() {
+    if (
+      restaurantLoading ||
+      restaurantRefreshCooldown > 0
+    ) {
+      return;
+    }
+
+    setRestaurantRefreshCooldown(
+      RESTAURANT_REFRESH_COOLDOWN_SECONDS
+    );
+    setRestaurantError("");
+    setSelectedRestaurantId(null);
+    setRestaurantRefreshKey(
+      (current) => current + 1
+    );
+  }
+
+  /* =======================================================
      4. 음식점 API
   ======================================================= */
 
@@ -678,6 +1206,8 @@ export default function MapPage() {
         setRestaurantLoading(true);
 
         setRestaurantError("");
+        setRestaurants([]);
+        setSelectedRestaurantId(null);
 
         /*
          * query string
@@ -726,7 +1256,9 @@ export default function MapPage() {
         if (controller.signal.aborted) return;
         setRestaurantError(data.message ?? "");
         setRestaurants(
-          data.restaurants ?? []
+          (data.restaurants ?? []).map(
+            normalizeRestaurant
+          )
         );
 
         setRegionName(
@@ -780,88 +1312,160 @@ export default function MapPage() {
     loadRestaurants();
     return () => controller.abort();
   }, [
-    location,
+    location?.latitude,
+    location?.longitude,
     restaurantRefreshKey,
   ]);
 
   /* =======================================================
-     5. MASK별 정렬 / 메뉴선호도 반경 필터
+     5. 개인설정 필터 + 사용자 가중치 정렬
   ======================================================= */
 
   const sortedRestaurants =
     useMemo(() => {
       const result =
         restaurants.filter(
-          (restaurant) =>
-            restaurant.recommendationEligible
+          (restaurant) => {
+            if (
+              !restaurant.recommendationEligible
+            ) {
+              return false;
+            }
+
+            /*
+             * 술집은 기본 추천에서 제외.
+             */
+            if (
+              restaurant.venueType ===
+                "bar" &&
+              !includeBars
+            ) {
+              return false;
+            }
+
+            /*
+             * 예산 필터
+             */
+            if (
+              budgetEnabled
+            ) {
+              if (
+                restaurant.priceKrw ===
+                  null ||
+                restaurant.priceSource ===
+                  "unknown"
+              ) {
+                if (
+                  !includeUnknownPrice
+                ) {
+                  return false;
+                }
+              } else if (
+                restaurant.priceKrw >
+                budgetKrw
+              ) {
+                return false;
+              }
+            }
+
+            /*
+             * 주차 필터
+             *
+             * true  -> 주차 가능
+             * false -> 주차 불가
+             * null/undefined -> 미확인
+             */
+            if (
+              parkingRequired
+            ) {
+              if (
+                restaurant.parkingAvailable ===
+                false
+              ) {
+                return false;
+              }
+
+              if (
+                restaurant.parkingAvailable !==
+                  true &&
+                !includeUnknownParking
+              ) {
+                return false;
+              }
+            }
+
+            return true;
+          }
         );
 
-      /*
-       * 추천
-       *
-       * 최종 추천 점수는 서버에서 계산합니다.
-       * 추후 가격 점수가 연결되면
-       * 가격 + 거리 + 메뉴선호도 기반으로 완성합니다.
-       */
-      if (
-        mode ===
-        "recommend"
-      ) {
-        result.sort(
-          (a, b) =>
-            b.recommendScore -
-            a.recommendScore
-        );
-
-        return result;
-      }
-
-      /*
-       * 메뉴선호도
-       *
-       * 거리는 점수에 반영하지 않습니다.
-       * 선택한 1~5km 반경 안에 있는 음식점만 남긴 뒤
-       * preferenceScore만으로 정렬합니다.
-       */
-      if (
-        mode ===
-        "preference"
-      ) {
-        return result
-          .filter(
-            (restaurant) =>
-              restaurant.distance <=
-              preferenceRadiusKm * 1000
-          )
-          .sort(
-            (a, b) =>
-              b.preferenceScore -
-              a.preferenceScore
-          );
-      }
-
-      /*
-       * 가성비
-       *
-       * 메뉴 취향 60%
-       * +
-       * 가격 점수 40%
-       *
-       * 실제 가게 가격과 지역 평균 비교자료가 없는 경우
-       * 가격점수는 중립값으로 처리됩니다.
-       */
       result.sort(
-        (a, b) =>
-          b.valueScore -
-          a.valueScore
+        (a, b) => {
+          /*
+           * 식사 목적 음식점을 먼저,
+           * 술집은 뒤에 별도 구역으로 배치합니다.
+           */
+          if (
+            a.venueType !==
+            b.venueType
+          ) {
+            return a.venueType ===
+              "bar"
+              ? 1
+              : -1;
+          }
+
+          return (
+            calculateWeightedRecommendScore(
+              b,
+              preferenceWeight
+            )
+            -
+            calculateWeightedRecommendScore(
+              a,
+              preferenceWeight
+            )
+          );
+        }
       );
 
       return result;
     }, [
       restaurants,
-      mode,
-      preferenceRadiusKm,
+      preferenceWeight,
+      budgetEnabled,
+      budgetKrw,
+      includeUnknownPrice,
+      parkingRequired,
+      includeUnknownParking,
+      includeBars,
     ]);
+
+  const mealRestaurantCount =
+    useMemo(
+      () =>
+        sortedRestaurants.filter(
+          (restaurant) =>
+            restaurant.venueType !==
+            "bar"
+        ).length,
+      [
+        sortedRestaurants,
+      ]
+    );
+
+  const barRestaurantCount =
+    useMemo(
+      () =>
+        sortedRestaurants.filter(
+          (restaurant) =>
+            restaurant.venueType ===
+            "bar"
+        ).length,
+      [
+        sortedRestaurants,
+      ]
+    );
+
 
   const closedRestaurants =
     useMemo(
@@ -871,14 +1475,22 @@ export default function MapPage() {
             (restaurant) =>
               !restaurant.recommendationEligible &&
               restaurant.businessHours.status !==
-                "UNKNOWN"
+                "UNKNOWN" &&
+              (
+                includeBars ||
+                restaurant.venueType !==
+                  "bar"
+              )
           )
           .sort(
             (a, b) =>
               a.distance -
               b.distance
           ),
-      [restaurants]
+      [
+        restaurants,
+        includeBars,
+      ]
     );
 
   /* =======================================================
@@ -909,26 +1521,19 @@ export default function MapPage() {
      현재 MASK 점수
   ======================================================= */
 
-  const getRestaurantScore = useCallback((restaurant: Restaurant) => {
-    if (
-      mode ===
-      "preference"
-    ) {
-      return restaurant
-        .preferenceScore;
-    }
-
-    if (
-      mode ===
-      "value"
-    ) {
-      return restaurant
-        .valueScore;
-    }
-
-    return restaurant
-      .recommendScore;
-  }, [mode]);
+  const getRestaurantScore =
+    useCallback(
+      (
+        restaurant: Restaurant
+      ) =>
+        calculateWeightedRecommendScore(
+          restaurant,
+          preferenceWeight
+        ),
+      [
+        preferenceWeight,
+      ]
+    );
 
   /* =======================================================
      음식점 선택
@@ -2101,6 +2706,253 @@ export default function MapPage() {
   }
 
 
+  function openPriceReportEditor(
+    restaurant: Restaurant
+  ) {
+    setPriceReportRestaurant(
+      restaurant
+    );
+
+    setPriceReportMenu(
+      restaurant.priceMenuName ||
+        restaurant.recommendedMenuName ||
+        ""
+    );
+
+    setPriceReportPrice(
+      ""
+    );
+
+    setPriceReportNote(
+      ""
+    );
+
+    setPriceReportError(
+      ""
+    );
+
+    setPriceReportSuccess(
+      ""
+    );
+
+    setShowPriceReportModal(
+      true
+    );
+  }
+
+
+  function closePriceReportEditor() {
+    if (
+      priceReportSaving
+    ) {
+      return;
+    }
+
+    setShowPriceReportModal(
+      false
+    );
+
+    setPriceReportRestaurant(
+      null
+    );
+
+    setPriceReportMenu(
+      ""
+    );
+
+    setPriceReportPrice(
+      ""
+    );
+
+    setPriceReportNote(
+      ""
+    );
+
+    setPriceReportError(
+      ""
+    );
+
+    setPriceReportSuccess(
+      ""
+    );
+  }
+
+
+  async function submitPriceReport() {
+    if (
+      !priceReportRestaurant ||
+      priceReportSaving
+    ) {
+      return;
+    }
+
+    const menuName =
+      priceReportMenu
+        .trim();
+
+    if (
+      !menuName
+    ) {
+      setPriceReportError(
+        "메뉴 이름을 입력해주세요."
+      );
+
+      return;
+    }
+
+    const reportedPriceKrw =
+      Number(
+        priceReportPrice
+      );
+
+    if (
+      !Number.isInteger(
+        reportedPriceKrw
+      ) ||
+      reportedPriceKrw <
+        100 ||
+      reportedPriceKrw >
+        10_000_000
+    ) {
+      setPriceReportError(
+        "가격은 100원 이상 10,000,000원 이하의 정수로 입력해주세요."
+      );
+
+      return;
+    }
+
+    const currentPriceMenu =
+      priceReportRestaurant
+        .priceMenuName
+        ?.trim() ||
+      priceReportRestaurant
+        .recommendedMenuName
+        ?.trim() ||
+      "";
+
+    const reportingCurrentMenu =
+      currentPriceMenu.length >
+        0 &&
+      menuName ===
+        currentPriceMenu;
+
+    try {
+      setPriceReportSaving(
+        true
+      );
+
+      setPriceReportError(
+        ""
+      );
+
+      setPriceReportSuccess(
+        ""
+      );
+
+      const response =
+        await fetch(
+          "/api/price-reports",
+          {
+            method:
+              "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                restaurantMenuPriceId:
+                  reportingCurrentMenu
+                    ? priceReportRestaurant
+                        .restaurantMenuPriceId
+                    : null,
+
+                restaurantName:
+                  priceReportRestaurant
+                    .name,
+
+                restaurantAddress:
+                  priceReportRestaurant
+                    .roadAddress ||
+                  priceReportRestaurant
+                    .address,
+
+                menuName,
+
+                reportedPriceKrw,
+
+                previousPriceKrw:
+                  reportingCurrentMenu
+                    ? priceReportRestaurant
+                        .directPriceKrw
+                    : null,
+
+                note:
+                  priceReportNote
+                    .trim() ||
+                  null,
+              }),
+          }
+        );
+
+      const data =
+        (await response.json()) as {
+          message?: string;
+        };
+
+      if (
+        response.status ===
+        401
+      ) {
+        router.replace(
+          "/login"
+        );
+
+        return;
+      }
+
+      if (
+        !response.ok
+      ) {
+        throw new Error(
+          data.message ??
+            "가격 제보를 저장하지 못했습니다."
+        );
+      }
+
+      setPriceReportSuccess(
+        data.message ??
+          "가격 제보가 접수되었습니다. 관리자 검토 후 반영됩니다."
+      );
+
+      setPriceReportPrice(
+        ""
+      );
+
+      setPriceReportNote(
+        ""
+      );
+
+    } catch (
+      error
+    ) {
+      setPriceReportError(
+        error instanceof
+          Error
+          ? error.message
+          : "가격 제보를 저장하지 못했습니다."
+      );
+
+    } finally {
+      setPriceReportSaving(
+        false
+      );
+    }
+  }
+
+
   function formatPriceKrw(
     price:
       number | null
@@ -2180,48 +3032,6 @@ export default function MapPage() {
       subtext:
         "가격 제보가 아직 없어요",
     };
-  }
-
-
-  function getPriceComparisonText(
-    restaurant: Restaurant
-  ) {
-
-    const difference =
-      restaurant
-        .priceComparedToRegionalPercent;
-
-
-    if (
-      difference ===
-      null
-    ) {
-
-      return null;
-    }
-
-
-    if (
-      difference <=
-      -5
-    ) {
-
-      return `지역 평균보다 ${Math.abs(
-        difference
-      )}% 저렴`;
-    }
-
-
-    if (
-      difference >=
-      5
-    ) {
-
-      return `지역 평균보다 ${difference}% 높음`;
-    }
-
-
-    return "지역 평균 수준";
   }
 
 
@@ -2318,19 +3128,12 @@ export default function MapPage() {
   const description = (() => {
     if (
       mode ===
-      "recommend"
+      "settings"
     ) {
-      return "메뉴 취향을 중심으로, 검증된 가격 비교가 있으면 가격과 거리까지 함께 반영해요";
+      return "개인 설정은 추천 점수에 섞지 않고 조건 필터로 적용해요.";
     }
 
-    if (
-      mode ===
-      "preference"
-    ) {
-      return `반경 ${preferenceRadiusKm}km 안에서 거리 점수 없이 메뉴 취향 순으로 보여줘요`;
-    }
-
-    return "메뉴 취향 60% + 가격 40%로 가성비가 좋은 곳부터 보여줘요";
+    return `메뉴 취향 ${preferenceWeight}% · 거리 ${distanceWeight}%로 추천해요.`;
   })();
 
   /* =======================================================
@@ -2379,7 +3182,7 @@ export default function MapPage() {
               HEADER
           ================================================= */}
 
-          <header className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+          <header className="grid grid-cols-[72px_1fr_72px] items-center border-b border-gray-100 px-5 py-4">
 
             <button
               type="button"
@@ -2387,26 +3190,59 @@ export default function MapPage() {
                 window.history.back()
               }
               className="flex h-10 w-10 items-center justify-center rounded-full text-gray-700 transition hover:bg-gray-100"
+              aria-label="뒤로가기"
             >
               ←
             </button>
 
-            <h1 className="text-lg font-bold text-gray-900">
+            <h1 className="text-center text-lg font-bold text-gray-900">
               점메추
             </h1>
 
-            <button
-              type="button"
-              onClick={() =>
-                router.push(
-                  "/mypage"
-                )
-              }
-              className="flex h-9 w-9 items-center justify-center rounded-full text-lg text-gray-500 transition hover:bg-gray-100"
-              aria-label="마이페이지"
-            >
-              👤
-            </button>
+            <div className="flex items-center justify-end gap-1">
+              <button
+                type="button"
+                onClick={() =>
+                  router.push(
+                    "/friends"
+                  )
+                }
+                className="relative flex h-9 w-9 items-center justify-center rounded-full text-lg text-gray-500 transition hover:bg-orange-50 hover:text-orange-500"
+                aria-label={
+                  incomingFriendRequestCount > 0
+                    ? `친구 알림 ${incomingFriendRequestCount}개`
+                    : "친구"
+                }
+                title="친구"
+              >
+                👥
+
+                {incomingFriendRequestCount > 0 && (
+                  <span
+                    className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-extrabold leading-none text-white shadow-sm ring-2 ring-white"
+                    aria-hidden="true"
+                  >
+                    {incomingFriendRequestCount > 99
+                      ? "99+"
+                      : incomingFriendRequestCount}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  router.push(
+                    "/mypage"
+                  )
+                }
+                className="flex h-9 w-9 items-center justify-center rounded-full text-lg text-gray-500 transition hover:bg-gray-100"
+                aria-label="마이페이지"
+                title="마이페이지"
+              >
+                👤
+              </button>
+            </div>
 
           </header>
           <section className="border-b border-gray-100 px-4 py-3" aria-label="지도에서 장소 검색">
@@ -2430,7 +3266,7 @@ export default function MapPage() {
           </section>
 
           {/* =================================================
-              MASK
+              추천 / 개인설정
           ================================================= */}
 
           <div className="border-b border-gray-100 px-4 py-3">
@@ -2458,104 +3294,485 @@ export default function MapPage() {
                 type="button"
                 onClick={() =>
                   setMode(
-                    "value"
+                    "settings"
                   )
                 }
                 className={`flex-1 rounded-xl py-2.5 text-sm font-semibold transition ${
                   mode ===
-                  "value"
+                  "settings"
                     ? "bg-white text-orange-500 shadow-sm"
                     : "text-gray-500"
                 }`}
               >
-                가성비
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  setMode(
-                    "preference"
-                  )
-                }
-                className={`flex-1 rounded-xl py-2.5 text-sm font-semibold transition ${
-                  mode ===
-                  "preference"
-                    ? "bg-white text-orange-500 shadow-sm"
-                    : "text-gray-500"
-                }`}
-              >
-                메뉴선호도
+                개인설정
               </button>
 
             </div>
 
-            {mode === "preference" && (
+
+            {mode ===
+              "recommend" && (
               <div className="mt-3 rounded-2xl border border-orange-100 bg-orange-50/60 p-4">
 
                 <div className="flex items-start justify-between gap-3">
 
                   <div>
+
                     <p className="text-xs font-bold text-gray-800">
-                      메뉴선호도 검색 범위
+                      추천 기준
                     </p>
 
                     <p className="mt-1 text-[11px] leading-4 text-gray-500">
-                      거리는 순위에 반영하지 않고 범위 제한에만 사용해요.
+                      메뉴 취향과 거리의 비중을 직접 조절해요.
                     </p>
+
                   </div>
 
+
                   <div className="shrink-0 rounded-full bg-orange-500 px-3 py-1.5 text-xs font-bold text-white shadow-sm">
-                    {preferenceRadiusKm}km · {preferenceRestaurantCount}곳
+                    취향 {preferenceWeight}% · 거리 {distanceWeight}%
                   </div>
 
                 </div>
 
+
                 <div className="mt-4">
+
+                  <div className="flex items-center justify-between text-[11px] font-bold">
+
+                    <span className="text-orange-600">
+                      🍽 메뉴 취향
+                    </span>
+
+                    <span className="text-blue-600">
+                      📍 거리
+                    </span>
+
+                  </div>
+
 
                   <input
                     type="range"
-                    min={1}
-                    max={5}
-                    step={1}
-                    value={preferenceRadiusKm}
+                    min={0}
+                    max={100}
+                    step={10}
+                    value={
+                      preferenceWeight
+                    }
                     onChange={(event) => {
-                      const nextRadius =
+                      setPreferenceWeight(
                         Number(
                           event.target.value
-                        ) as PreferenceRadiusKm;
-
-                      setPreferenceRadiusKm(
-                        nextRadius
+                        )
                       );
 
                       setSelectedRestaurantId(
                         null
                       );
                     }}
-                    aria-label="메뉴선호도 검색 반경"
-                    className="w-full cursor-pointer accent-orange-500"
+                    aria-label="메뉴 취향 추천 가중치"
+                    className="mt-2 w-full cursor-pointer accent-orange-500"
                   />
 
-                  <div className="mt-1 flex justify-between px-0.5 text-[10px] font-semibold text-gray-400">
-                    {[1, 2, 3, 4, 5].map(
-                      (radius) => (
-                        <span
+
+                  <div className="mt-3 grid grid-cols-4 gap-2">
+
+                    {[
+                      {
+                        value: 30,
+                        label: "거리 우선",
+                      },
+                      {
+                        value: 50,
+                        label: "균형",
+                      },
+                      {
+                        value: 70,
+                        label: "취향 우선",
+                      },
+                      {
+                        value: 90,
+                        label: "취향 최우선",
+                      },
+                    ].map(
+                      (
+                        preset
+                      ) => (
+                        <button
                           key={
-                            radius
+                            preset.value
                           }
-                          className={
-                            preferenceRadiusKm ===
-                            radius
-                              ? "text-orange-500"
-                              : ""
-                          }
+                          type="button"
+                          onClick={() => {
+                            setPreferenceWeight(
+                              preset.value
+                            );
+
+                            setSelectedRestaurantId(
+                              null
+                            );
+                          }}
+                          className={`rounded-xl px-1 py-2 text-[10px] font-bold transition ${
+                            preferenceWeight ===
+                            preset.value
+                              ? "bg-orange-500 text-white"
+                              : "bg-white text-gray-500 shadow-sm"
+                          }`}
                         >
-                          {radius}km
-                        </span>
+                          {
+                            preset.label
+                          }
+                        </button>
                       )
                     )}
+
                   </div>
+
+                </div>
+
+
+                {(budgetEnabled ||
+                  parkingRequired ||
+                  includeBars) && (
+                  <div className="mt-4 flex flex-wrap gap-2 border-t border-orange-100 pt-3">
+
+                    <span className="text-[10px] font-bold text-gray-400">
+                      적용 중
+                    </span>
+
+                    {budgetEnabled && (
+                      <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-emerald-600 shadow-sm">
+                        💰 {budgetKrw.toLocaleString("ko-KR")}원 이하
+                      </span>
+                    )}
+
+                    {parkingRequired && (
+                      <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-blue-600 shadow-sm">
+                        🅿 주차 가능
+                      </span>
+                    )}
+
+                    {includeBars && (
+                      <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-violet-600 shadow-sm">
+                        🍺 술집 포함
+                      </span>
+                    )}
+
+                  </div>
+                )}
+
+              </div>
+            )}
+
+
+            {mode ===
+              "settings" && (
+              <div className="mt-3 space-y-3">
+
+                {/* 예산 */}
+                <section className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4">
+
+                  <label className="flex cursor-pointer items-start justify-between gap-3">
+
+                    <div>
+
+                      <p className="text-xs font-bold text-gray-800">
+                        💰 1인 예산
+                      </p>
+
+                      <p className="mt-1 text-[11px] leading-4 text-gray-500">
+                        켜면 예산을 초과한 식당을 추천에서 제외해요.
+                      </p>
+
+                    </div>
+
+                    <input
+                      type="checkbox"
+                      checked={
+                        budgetEnabled
+                      }
+                      onChange={(event) => {
+                        setBudgetEnabled(
+                          event.target.checked
+                        );
+
+                        setSelectedRestaurantId(
+                          null
+                        );
+                      }}
+                      className="mt-0.5 h-5 w-5 accent-emerald-500"
+                    />
+
+                  </label>
+
+
+                  {budgetEnabled && (
+                    <>
+
+                      <div className="mt-4 grid grid-cols-4 gap-2">
+
+                        {[10_000, 15_000, 20_000, 30_000].map(
+                          (
+                            preset
+                          ) => (
+                            <button
+                              key={
+                                preset
+                              }
+                              type="button"
+                              onClick={() => {
+                                setBudgetKrw(
+                                  preset
+                                );
+
+                                setSelectedRestaurantId(
+                                  null
+                                );
+                              }}
+                              className={`rounded-xl px-2 py-2 text-[11px] font-bold transition ${
+                                budgetKrw ===
+                                preset
+                                  ? "bg-emerald-500 text-white"
+                                  : "bg-white text-gray-600 shadow-sm"
+                              }`}
+                            >
+                              {(
+                                preset /
+                                10_000
+                              ).toLocaleString(
+                                "ko-KR"
+                              )}만원
+                            </button>
+                          )
+                        )}
+
+                      </div>
+
+
+                      <label className="mt-3 block">
+
+                        <span className="text-[11px] font-semibold text-gray-500">
+                          직접 입력
+                        </span>
+
+                        <div className="mt-1 flex items-center rounded-xl border border-emerald-100 bg-white px-3">
+
+                          <input
+                            type="number"
+                            min={1_000}
+                            max={500_000}
+                            step={1_000}
+                            value={
+                              budgetKrw
+                            }
+                            onChange={(event) => {
+                              const value =
+                                Number(
+                                  event.target.value
+                                );
+
+                              if (
+                                Number.isFinite(
+                                  value
+                                )
+                              ) {
+                                setBudgetKrw(
+                                  Math.min(
+                                    500_000,
+                                    Math.max(
+                                      1_000,
+                                      Math.round(
+                                        value
+                                      )
+                                    )
+                                  )
+                                );
+
+                                setSelectedRestaurantId(
+                                  null
+                                );
+                              }
+                            }}
+                            aria-label="1인 최대 예산"
+                            className="min-w-0 flex-1 bg-transparent py-3 text-sm font-bold text-gray-800 outline-none"
+                          />
+
+                          <span className="text-xs font-bold text-gray-400">
+                            원
+                          </span>
+
+                        </div>
+
+                      </label>
+
+
+                      <label className="mt-3 flex cursor-pointer items-center gap-2 rounded-xl bg-white px-3 py-3">
+
+                        <input
+                          type="checkbox"
+                          checked={
+                            includeUnknownPrice
+                          }
+                          onChange={(event) => {
+                            setIncludeUnknownPrice(
+                              event.target.checked
+                            );
+
+                            setSelectedRestaurantId(
+                              null
+                            );
+                          }}
+                          className="h-4 w-4 accent-emerald-500"
+                        />
+
+                        <div>
+
+                          <p className="text-xs font-bold text-gray-700">
+                            가격 미확인 식당도 포함
+                          </p>
+
+                          <p className="mt-0.5 text-[10px] leading-4 text-gray-400">
+                            가격 데이터가 없는 식당을 추천에서 숨길지 선택해요.
+                          </p>
+
+                        </div>
+
+                      </label>
+
+                    </>
+                  )}
+
+                </section>
+
+
+                {/* 주차 */}
+                <section className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+
+                  <label className="flex cursor-pointer items-start justify-between gap-3">
+
+                    <div>
+
+                      <p className="text-xs font-bold text-gray-800">
+                        🅿 주차 가능한 곳만
+                      </p>
+
+                      <p className="mt-1 text-[11px] leading-4 text-gray-500">
+                        켜면 주차 불가로 확인된 식당을 추천에서 제외해요.
+                      </p>
+
+                    </div>
+
+                    <input
+                      type="checkbox"
+                      checked={
+                        parkingRequired
+                      }
+                      onChange={(event) => {
+                        setParkingRequired(
+                          event.target.checked
+                        );
+
+                        setSelectedRestaurantId(
+                          null
+                        );
+                      }}
+                      className="mt-0.5 h-5 w-5 accent-blue-500"
+                    />
+
+                  </label>
+
+
+                  {parkingRequired && (
+                    <label className="mt-3 flex cursor-pointer items-center gap-2 rounded-xl bg-white px-3 py-3">
+
+                      <input
+                        type="checkbox"
+                        checked={
+                          includeUnknownParking
+                        }
+                        onChange={(event) => {
+                          setIncludeUnknownParking(
+                            event.target.checked
+                          );
+
+                          setSelectedRestaurantId(
+                            null
+                          );
+                        }}
+                        className="h-4 w-4 accent-blue-500"
+                      />
+
+                      <div>
+
+                        <p className="text-xs font-bold text-gray-700">
+                          주차 정보 미확인 식당도 포함
+                        </p>
+
+                        <p className="mt-0.5 text-[10px] leading-4 text-gray-400">
+                          현재 주차 데이터가 없는 식당이 많아 기본으로 포함해요.
+                        </p>
+
+                      </div>
+
+                    </label>
+                  )}
+
+
+                  <p className="mt-3 text-[10px] leading-4 text-blue-500/80">
+                    주차 정보는 추후 관리자/사용자 제보 데이터가 연결되면 이 설정에 바로 반영돼요.
+                  </p>
+
+                </section>
+
+
+                {/* 술집 */}
+                <section className="rounded-2xl border border-violet-100 bg-violet-50/60 p-4">
+
+                  <label className="flex cursor-pointer items-start justify-between gap-3">
+
+                    <div>
+
+                      <p className="text-xs font-bold text-gray-800">
+                        🍺 술집도 보기
+                      </p>
+
+                      <p className="mt-1 text-[11px] leading-4 text-gray-500">
+                        점심/식사 추천에서는 기본으로 제외해요. 켜면 일반 음식점 아래에 술집을 따로 표시해요.
+                      </p>
+
+                    </div>
+
+                    <input
+                      type="checkbox"
+                      checked={
+                        includeBars
+                      }
+                      onChange={(event) => {
+                        setIncludeBars(
+                          event.target.checked
+                        );
+
+                        setSelectedRestaurantId(
+                          null
+                        );
+                      }}
+                      className="mt-0.5 h-5 w-5 accent-violet-500"
+                    />
+
+                  </label>
+
+                </section>
+
+
+                <div className="rounded-2xl bg-gray-900 px-4 py-3 text-white">
+
+                  <p className="text-xs font-bold text-orange-300">
+                    설정 적용 방식
+                  </p>
+
+                  <p className="mt-1 text-[11px] leading-5 text-white/65">
+                    개인설정은 식당을 먼저 필터링하고, 남은 식당을 추천 탭의 메뉴 취향/거리 비율로 정렬해요.
+                  </p>
 
                 </div>
 
@@ -2643,9 +3860,10 @@ export default function MapPage() {
                       </p>
 
                       <p className="mt-1 line-clamp-1 text-xs text-gray-500">
-                        {
-                          selectedRestaurant.category
-                        }
+                        {selectedRestaurant.venueType ===
+                        "bar"
+                          ? `🍺 술집 · ${selectedRestaurant.category}`
+                          : selectedRestaurant.category}
                       </p>
 
                     </div>
@@ -2718,11 +3936,6 @@ export default function MapPage() {
 
                       </div>
 
-                      {selectedRestaurant.priceComparable && (
-                        <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-emerald-600">
-                          가격 {selectedRestaurant.priceScore}
-                        </span>
-                      )}
 
                     </div>
 
@@ -2737,7 +3950,7 @@ export default function MapPage() {
                       )}
                     </span>
 
-                    {mode === "preference" &&
+                    {mode === "recommend" &&
                       selectedRestaurant
                         .matchedPreferences
                         .slice(0, 2)
@@ -2881,7 +4094,7 @@ export default function MapPage() {
               {description}
             </p>
 
-            {mode === "preference" &&
+            {mode === "recommend" &&
               recommendationMode === "embedding" &&
               searchMenus.length > 0 && (
                 <div className="mt-4 rounded-3xl border border-orange-100 bg-gradient-to-br from-orange-50 to-white p-4">
@@ -2899,7 +4112,7 @@ export default function MapPage() {
                     </div>
 
                     <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-orange-500 shadow-sm">
-                      반경 {preferenceRadiusKm}km
+                      취향 {preferenceWeight}%
                     </span>
 
                   </div>
@@ -2918,28 +4131,49 @@ export default function MapPage() {
                   </div>
 
                   <p className="mt-3 text-[11px] leading-5 text-gray-400">
-                    거리 점수는 섞지 않고, 선택한 반경 안에서 메뉴 취향이 잘 맞는 곳을 찾아요.
+                    AI 메뉴 취향 점수는 현재 설정한 취향 비율만큼 최종 추천 점수에 반영돼요.
                   </p>
 
                 </div>
               )}
 
-            <div className="mt-4 flex items-end justify-between">
+            <div className="mt-4 flex items-end justify-between gap-3">
 
-              <h2 className="text-xl font-bold text-gray-900">
-                {mode === "preference"
-                  ? "메뉴 취향 맛집"
-                  : mode === "value"
-                    ? "가성비 맛집"
+              <div>
+                <h2 className="text-xl font-bold text-gray-900">
+                  {mode === "settings"
+                    ? "설정 적용 결과"
                     : "근처 추천 맛집"}
-              </h2>
+                </h2>
 
-              {!restaurantLoading &&
-                sortedRestaurants.length > 0 && (
-                  <span className="text-xs text-gray-400">
-                    {sortedRestaurants.length}곳
-                  </span>
-                )}
+                {!restaurantLoading &&
+                  sortedRestaurants.length > 0 && (
+                    <p className="mt-1 text-xs text-gray-400">
+                      {mealRestaurantCount}곳
+                      {barRestaurantCount > 0
+                        ? ` · 술집 ${barRestaurantCount}곳`
+                        : ""}
+                    </p>
+                  )}
+              </div>
+
+              <button
+                type="button"
+                onClick={refreshRestaurants}
+                disabled={
+                  restaurantLoading ||
+                  restaurantRefreshCooldown > 0 ||
+                  !location
+                }
+                className="shrink-0 rounded-xl border border-orange-100 bg-orange-50 px-3 py-2 text-xs font-bold text-orange-600 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
+                title="현재 기준 위치에서 음식점을 다시 검색합니다."
+              >
+                {restaurantLoading
+                  ? "검색 중"
+                  : restaurantRefreshCooldown > 0
+                    ? `${restaurantRefreshCooldown}초`
+                    : "↻ 새로고침"}
+              </button>
 
             </div>
 
@@ -2974,7 +4208,7 @@ export default function MapPage() {
               sortedRestaurants.length ===
                 0 && (
                 <div className="mt-5 rounded-2xl bg-gray-50 p-5 text-center text-sm text-gray-500">
-                  주변 음식점을 찾지 못했어요.
+                  조건에 맞는 음식점을 찾지 못했어요. 개인설정의 필터를 조금 완화해보세요.
                 </div>
               )}
 
@@ -3007,11 +4241,46 @@ export default function MapPage() {
                       restaurant
                     );
 
+                  const showBarDivider =
+                    restaurant.venueType ===
+                      "bar" &&
+                    (
+                      index ===
+                        0 ||
+                      sortedRestaurants[
+                        index -
+                        1
+                      ]
+                        ?.venueType !==
+                        "bar"
+                    );
+
                   return (
-                    <article
+                    <Fragment
                       key={
                         restaurant.id
                       }
+                    >
+
+                      {showBarDivider && (
+                        <div className="pt-5">
+
+                          <div className="rounded-2xl border border-violet-100 bg-violet-50 px-4 py-3">
+
+                            <p className="text-sm font-black text-violet-700">
+                              🍺 술집
+                            </p>
+
+                            <p className="mt-1 text-[11px] leading-5 text-violet-500">
+                              식사 목적 음식점과 구분해서 표시해요.
+                            </p>
+
+                          </div>
+
+                        </div>
+                      )}
+
+                    <article
                       ref={(
                         element
                       ) => {
@@ -3061,10 +4330,18 @@ export default function MapPage() {
                                 }
                               </h3>
 
-                              <p className="mt-1 line-clamp-1 text-xs text-gray-500">
-                                {
-                                  restaurant.category
-                                }
+                              <p
+                                className={`mt-1 line-clamp-1 text-xs ${
+                                  restaurant.venueType ===
+                                  "bar"
+                                    ? "font-semibold text-violet-600"
+                                    : "text-gray-500"
+                                }`}
+                              >
+                                {restaurant.venueType ===
+                                "bar"
+                                  ? `🍺 술집 · ${restaurant.category}`
+                                  : restaurant.category}
                               </p>
 
                               <div className="mt-2">
@@ -3117,6 +4394,20 @@ export default function MapPage() {
                               )}
                             </span>
 
+                            {restaurant.parkingAvailable ===
+                              true && (
+                              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-600">
+                                🅿 주차 가능
+                              </span>
+                            )}
+
+                            {restaurant.parkingAvailable ===
+                              false && (
+                              <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-400">
+                                🅿 주차 불가
+                              </span>
+                            )}
+
                             <span
                               className={`rounded-full px-2.5 py-1 text-xs ${
                                 restaurant.priceSource ===
@@ -3136,8 +4427,10 @@ export default function MapPage() {
                               }
                             </span>
 
-                            {mode === "preference" &&
-                              restaurant.matchedPreferences.map(
+                            {mode === "recommend" &&
+                              restaurant.matchedPreferences
+                                .slice(0, 3)
+                                .map(
                                 (
                                   preference
                                 ) => (
@@ -3155,19 +4448,21 @@ export default function MapPage() {
                               )}
 
                           </div>
-                          {/* 가성비 전용 가격 분석 */}
+                          {/* 개인설정 예산 필터 안내 */}
 
-                          {mode === "value" && (
+                          {budgetEnabled && (
                             <div className="mt-3 rounded-2xl bg-emerald-50/70 p-3">
 
                               <div className="flex items-center justify-between gap-3">
 
                                 <p className="text-xs font-bold text-emerald-700">
-                                  💰 가성비 분석
+                                  💰 예산 확인
                                 </p>
 
                                 <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-emerald-600 shadow-sm">
-                                  가성비 {restaurant.valueScore}
+                                  최대 {formatPriceKrw(
+                                    budgetKrw
+                                  )}
                                 </span>
 
                               </div>
@@ -3202,53 +4497,34 @@ export default function MapPage() {
                               </div>
 
 
-                              {restaurant.priceComparable &&
-                                restaurant.regionalAveragePriceKrw !==
-                                  null && (
-                                  <div className="mt-3 flex flex-wrap gap-2">
-
-                                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-600">
-                                      지역 평균{" "}
-                                      {formatPriceKrw(
-                                        restaurant.regionalAveragePriceKrw
-                                      )}
-                                    </span>
-
-                                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-emerald-600">
-                                      {
-                                        getPriceComparisonText(
-                                          restaurant
-                                        )
-                                      }
-                                    </span>
-
-                                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-500">
-                                      가격점수 {restaurant.priceScore}
-                                    </span>
-
-                                  </div>
-                                )}
-
-
-                              {!restaurant.priceComparable && (
+                              {restaurant.priceSource ===
+                                "unknown" ? (
                                 <p className="mt-2 text-[11px] leading-5 text-gray-400">
-                                  이 추천 메뉴의 실제 가격과 지역 평균이 쌓이면 가성비 점수가 더 정확해져요.
+                                  가격 미확인 식당이에요. 현재 설정에서는 추천 목록에 포함하고 있어요.
+                                </p>
+                              ) : (
+                                <p className="mt-2 text-[11px] font-semibold text-emerald-600">
+                                  ✓ 설정한 예산 범위 안이에요.
+                                  {restaurant.priceSource ===
+                                    "regional"
+                                    ? " 지역 평균 기준 참고값이에요."
+                                    : ""}
                                 </p>
                               )}
 
                             </div>
                           )}
 
-                          {/* 메뉴선호도 전용 AI 추천 정보 */}
+                          {/* 추천 결과의 AI 취향 근거 */}
 
-                          {mode === "preference" &&
+                          {mode === "recommend" &&
                             recommendationMode === "embedding" && (
                               <div className="mt-3 rounded-2xl bg-orange-50/70 p-3">
 
                                 <div className="flex items-center justify-between gap-3">
 
                                   <p className="text-xs font-bold text-orange-700">
-                                    ✨ 메뉴 취향 추천
+                                    ✨ 취향 반영
                                   </p>
 
                                   <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-orange-600 shadow-sm">
@@ -3292,9 +4568,9 @@ export default function MapPage() {
                                   </div>
 
                                   <p className="text-right text-[11px] leading-5 text-gray-400">
-                                    거리는 {formatDistance(restaurant.distance)}로 표시만 하고
+                                    최종 점수는 취향 {preferenceWeight}% +
                                     <br />
-                                    메뉴선호도 점수에는 반영하지 않아요.
+                                    거리 {distanceWeight}%로 계산해요.
                                   </p>
                                 </div>
 
@@ -3344,6 +4620,23 @@ export default function MapPage() {
                                 : "영업시간 수정"}
                             </button>
 
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+
+                                openPriceReportEditor(
+                                  restaurant
+                                );
+                              }}
+                              className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
+                            >
+                              {restaurant.priceSource ===
+                              "direct"
+                                ? "가격 수정 제보"
+                                : "가격 제보"}
+                            </button>
+
                           </div>
 
                         </div>
@@ -3351,6 +4644,8 @@ export default function MapPage() {
                       </div>
 
                     </article>
+
+                    </Fragment>
                   );
                 }
               )}
@@ -3401,7 +4696,10 @@ export default function MapPage() {
                                 </h4>
 
                                 <p className="mt-1 line-clamp-1 text-[11px] text-gray-500">
-                                  {restaurant.category}
+                                  {restaurant.venueType ===
+                                  "bar"
+                                    ? `🍺 술집 · ${restaurant.category}`
+                                    : restaurant.category}
                                 </p>
                               </div>
 
@@ -3442,6 +4740,21 @@ export default function MapPage() {
                                 className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
                               >
                                 영업시간 수정
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openPriceReportEditor(
+                                    restaurant
+                                  )
+                                }
+                                className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
+                              >
+                                {restaurant.priceSource ===
+                                "direct"
+                                  ? "가격 수정 제보"
+                                  : "가격 제보"}
                               </button>
 
                             </div>
@@ -3554,6 +4867,286 @@ export default function MapPage() {
 
         </div>
       )}
+
+      {/* 가격 제보 모달 */}
+      {showPriceReportModal &&
+        priceReportRestaurant && (
+          <div className="fixed inset-0 z-[10020] flex items-center justify-center bg-black/35 px-4">
+
+            <div className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl">
+
+              <div className="flex items-start justify-between gap-3">
+
+                <div className="min-w-0">
+
+                  <p className="text-xs font-bold text-orange-500">
+                    💰 메뉴 가격 제보
+                  </p>
+
+                  <h3 className="mt-1 truncate text-lg font-bold text-gray-900">
+                    {priceReportRestaurant.name}
+                  </h3>
+
+                  <p className="mt-1 text-xs leading-5 text-gray-400">
+                    실제 매장에서 확인한 메뉴 가격을 알려주세요.
+                    관리자 검토 후 가격 정보와 지역 평균에 반영돼요.
+                  </p>
+
+                </div>
+
+                <button
+                  type="button"
+                  onClick={
+                    closePriceReportEditor
+                  }
+                  disabled={
+                    priceReportSaving
+                  }
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 disabled:opacity-40"
+                  aria-label="가격 제보 닫기"
+                >
+                  ✕
+                </button>
+
+              </div>
+
+
+              <div className="mt-4 rounded-2xl bg-gray-50 p-4">
+
+                <p className="text-[11px] font-bold text-gray-400">
+                  현재 가격 정보
+                </p>
+
+                <p className="mt-1 text-sm font-black text-gray-800">
+                  {
+                    getPriceSummary(
+                      priceReportRestaurant
+                    ).text
+                  }
+                </p>
+
+                <p className="mt-1 text-[11px] leading-5 text-gray-400">
+                  {
+                    getPriceSummary(
+                      priceReportRestaurant
+                    ).subtext
+                  }
+                </p>
+
+                {priceReportRestaurant.priceSource ===
+                  "regional" && (
+                  <p className="mt-2 text-[11px] leading-5 text-blue-500">
+                    지역 평균은 참고값이에요. 제보한 실제 가격이 승인되면 이 가게의 확인 가격으로 표시돼요.
+                  </p>
+                )}
+
+              </div>
+
+
+              <label className="mt-5 block">
+
+                <span className="text-xs font-bold text-gray-600">
+                  메뉴 이름
+                </span>
+
+                <input
+                  type="text"
+                  value={
+                    priceReportMenu
+                  }
+                  onChange={(event) => {
+                    setPriceReportMenu(
+                      event.target.value
+                    );
+
+                    setPriceReportError(
+                      ""
+                    );
+
+                    setPriceReportSuccess(
+                      ""
+                    );
+                  }}
+                  maxLength={200}
+                  placeholder="예: 돈가스"
+                  className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm text-gray-800 outline-none transition placeholder:text-gray-300 focus:border-orange-400"
+                />
+
+                <p className="mt-1 text-[11px] leading-5 text-gray-400">
+                  추천 메뉴가 자동으로 들어가며, 다른 메뉴를 제보할 경우 직접 수정할 수 있어요.
+                </p>
+
+              </label>
+
+
+              <label className="mt-4 block">
+
+                <span className="text-xs font-bold text-gray-600">
+                  실제 가격
+                </span>
+
+                <div className="mt-2 flex items-center rounded-xl border border-gray-200 px-4 focus-within:border-orange-400">
+
+                  <input
+                    type="number"
+                    min={100}
+                    max={10000000}
+                    step={100}
+                    inputMode="numeric"
+                    value={
+                      priceReportPrice
+                    }
+                    onChange={(event) => {
+                      setPriceReportPrice(
+                        event.target.value
+                      );
+
+                      setPriceReportError(
+                        ""
+                      );
+
+                      setPriceReportSuccess(
+                        ""
+                      );
+                    }}
+                    placeholder="예: 12000"
+                    className="min-w-0 flex-1 bg-transparent py-3 text-sm font-bold text-gray-800 outline-none placeholder:text-gray-300"
+                  />
+
+                  <span className="text-xs font-bold text-gray-400">
+                    원
+                  </span>
+
+                </div>
+
+                {priceReportRestaurant.directPriceKrw !==
+                  null && (
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    현재 확인 가격:{" "}
+                    {
+                      formatPriceKrw(
+                        priceReportRestaurant
+                          .directPriceKrw
+                      )
+                    }
+                  </p>
+                )}
+
+              </label>
+
+
+              <label className="mt-4 block">
+
+                <span className="text-xs font-bold text-gray-600">
+                  추가 설명{" "}
+                  <span className="font-normal text-gray-300">
+                    (선택)
+                  </span>
+                </span>
+
+                <textarea
+                  value={
+                    priceReportNote
+                  }
+                  onChange={(event) => {
+                    setPriceReportNote(
+                      event.target.value
+                    );
+
+                    setPriceReportError(
+                      ""
+                    );
+
+                    setPriceReportSuccess(
+                      ""
+                    );
+                  }}
+                  maxLength={1000}
+                  rows={3}
+                  placeholder="예: 매장 메뉴판에서 확인했어요."
+                  className="mt-2 w-full resize-none rounded-xl border border-gray-200 px-4 py-3 text-sm text-gray-800 outline-none transition placeholder:text-gray-300 focus:border-orange-400"
+                />
+
+              </label>
+
+
+              <a
+                href={getNaverMapLink(
+                  priceReportRestaurant
+                )}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-4 flex w-full items-center justify-center rounded-xl bg-green-50 py-3 text-xs font-bold text-green-700 transition hover:bg-green-100"
+              >
+                네이버 지도에서 확인 →
+              </a>
+
+
+              {priceReportError && (
+                <div className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-xs leading-5 text-red-500">
+                  {priceReportError}
+                </div>
+              )}
+
+
+              {priceReportSuccess && (
+                <div className="mt-3 rounded-xl bg-emerald-50 px-3 py-3">
+
+                  <p className="text-xs font-bold text-emerald-600">
+                    ✓ 제보가 접수됐어요
+                  </p>
+
+                  <p className="mt-1 text-[11px] leading-5 text-emerald-600/80">
+                    {priceReportSuccess}
+                  </p>
+
+                </div>
+              )}
+
+
+              <div className="mt-5 flex gap-2">
+
+                <button
+                  type="button"
+                  disabled={
+                    priceReportSaving
+                  }
+                  onClick={
+                    closePriceReportEditor
+                  }
+                  className="flex-1 rounded-xl bg-gray-100 py-3 text-sm font-semibold text-gray-600 disabled:opacity-40"
+                >
+                  {priceReportSuccess
+                    ? "닫기"
+                    : "취소"}
+                </button>
+
+                {!priceReportSuccess && (
+                  <button
+                    type="button"
+                    disabled={
+                      priceReportSaving ||
+                      !priceReportMenu
+                        .trim() ||
+                      !priceReportPrice
+                    }
+                    onClick={
+                      submitPriceReport
+                    }
+                    className="flex-1 rounded-xl bg-orange-500 py-3 text-sm font-bold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {priceReportSaving
+                      ? "제보 중..."
+                      : "가격 제보"}
+                  </button>
+                )}
+
+              </div>
+
+            </div>
+
+          </div>
+        )}
 
       {/* 영업시간 등록/수정 모달 */}
       {showBusinessHoursModal &&

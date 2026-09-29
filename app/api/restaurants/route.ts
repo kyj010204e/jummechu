@@ -7,6 +7,10 @@ import {
 import { rateLimit } from "@/lib/rate-limit";
 
 import {
+  getSemanticRestaurantSearchAliases,
+} from "@/lib/restaurant-search-terms";
+
+import {
   attachRestaurantPrices,
   type RestaurantPriceFields,
 } from "@/lib/price-resolver";
@@ -42,6 +46,14 @@ const NAVER_SEARCH_MENU_COUNT = 8;
  * 정확 메뉴 8개 + family 6개 = 14개
  */
 const NAVER_FAMILY_SEARCH_COUNT = 6;
+
+/*
+ * 정확 메뉴명과 실제 가게 메뉴 표기가 다른 경우를 위한
+ * 의미 별칭 검색 수입니다.
+ *
+ * 예: 제육덮밥 -> 제육 / 제육볶음 / 제육 백반
+ */
+const NAVER_ALIAS_SEARCH_COUNT = 8;
 
 const EXCLUDED_NAVER_FAMILIES =
   new Set([
@@ -195,12 +207,23 @@ type NaverLocalResponse = {
    응답 음식점 타입
 ========================================================= */
 
+type RestaurantVenueType =
+  | "restaurant"
+  | "bar";
+
+
 type RestaurantCore = {
   id: string;
 
   name: string;
 
   category: string;
+
+  venueType:
+    RestaurantVenueType;
+
+  venueTypeLabel:
+    "음식점" | "술집";
 
   address: string;
 
@@ -440,6 +463,7 @@ type RecommendationCandidate = {
 type SearchTermKind =
   | "favorite"
   | "menu"
+  | "alias"
   | "family"
   | "category";
 
@@ -551,11 +575,81 @@ const BLOCKED_NAVER_CATEGORY_KEYWORDS = [
   "식품제조",
   "도매",
   "소매",
-  "주점",
-  "술집",
   "노래방",
   "숙박",
 ];
+
+
+const BAR_NAVER_CATEGORY_KEYWORDS = [
+  "주점",
+  "술집",
+  "요리주점",
+  "이자카야",
+  "호프",
+  "맥주",
+  "펍",
+  "pub",
+  "와인바",
+  "칵테일바",
+  "포장마차",
+  "실내포장마차",
+  "포차",
+  "바(bar)",
+  "bar",
+];
+
+
+function isBarNaverItem(
+  item: NaverLocalItem
+) {
+  const category =
+    stripHtml(
+      item.category ?? ""
+    ).toLowerCase();
+
+  if (
+    includesAny(
+      category,
+      BAR_NAVER_CATEGORY_KEYWORDS
+    )
+  ) {
+    return true;
+  }
+
+  /*
+   * 단순 "바" 한 글자는
+   * 바른..., 바다... 같은 오탐이 많아서
+   * 상호명 보조 판정에는 사용하지 않습니다.
+   */
+  const title =
+    stripHtml(
+      item.title ?? ""
+    ).toLowerCase();
+
+  return includesAny(
+    title,
+    [
+      "이자카야",
+      "와인바",
+      "칵테일바",
+      "포차",
+      "호프",
+      "펍",
+      "pub",
+    ]
+  );
+}
+
+
+function getRestaurantVenueType(
+  item: NaverLocalItem
+): RestaurantVenueType {
+  return isBarNaverItem(
+    item
+  )
+    ? "bar"
+    : "restaurant";
+}
 
 
 const FOOD_NAVER_CATEGORY_KEYWORDS = [
@@ -1079,7 +1173,14 @@ function isRelevantNaverResult(
   }
 
 
+  const isBarCategory =
+    isBarNaverItem(
+      item
+    );
+
+
   if (
+    !isBarCategory &&
     !includesAny(
       category,
       FOOD_NAVER_CATEGORY_KEYWORDS
@@ -3285,7 +3386,115 @@ function buildNaverSearchTerms(
 
 
   /* -------------------------------------------------------
-     3. 메뉴 family 확장 검색
+     3. 의미 별칭 확장 검색
+
+     추천 메뉴명과 실제 음식점 메뉴 표기가 다를 때
+     후보군에서 매장이 통째로 누락되는 문제를 줄입니다.
+
+     예:
+     제육덮밥 -> 제육 / 제육볶음 / 제육 백반
+     불고기덮밥 -> 불고기
+     오징어덮밥 -> 오징어 / 오징어볶음
+
+     정확 메뉴보다 신뢰도는 조금 낮게 주고,
+     최종적으로 실제 거리 점수와 함께 다시 정렬합니다.
+  ------------------------------------------------------- */
+
+  let aliasCount = 0;
+
+  const aliasSeeds = [
+    ...favoriteFoods.map(
+      (food) => ({
+        name: food.name,
+        sourceMenu: food.name,
+        score: 100,
+      })
+    ),
+
+    ...recommendations.map(
+      (item) => ({
+        name: item.name,
+        sourceMenu: item.name,
+        score: scoreToPercent(
+          item.baseScore
+        ),
+      })
+    ),
+  ];
+
+
+  for (
+    const seed
+    of aliasSeeds
+  ) {
+
+    const aliases =
+      getSemanticRestaurantSearchAliases(
+        seed.name
+      );
+
+
+    for (
+      const alias
+      of aliases
+    ) {
+
+      if (
+        seenQueries.has(
+          alias
+        )
+      ) {
+        continue;
+      }
+
+
+      seenQueries.add(
+        alias
+      );
+
+
+      result.push({
+        name:
+          alias,
+
+        sourceMenu:
+          seed.sourceMenu,
+
+        score:
+          clamp(
+            seed.score - 4,
+            0,
+            100
+          ),
+
+        kind:
+          "alias",
+      });
+
+
+      aliasCount++;
+
+
+      if (
+        aliasCount >=
+        NAVER_ALIAS_SEARCH_COUNT
+      ) {
+        break;
+      }
+    }
+
+
+    if (
+      aliasCount >=
+      NAVER_ALIAS_SEARCH_COUNT
+    ) {
+      break;
+    }
+  }
+
+
+  /* -------------------------------------------------------
+     4. 메뉴 family 확장 검색
 
      family 검색은 정확 메뉴보다 범위가 넓으므로
      적합도 점수를 소폭 낮춰 과대평가를 방지합니다.
@@ -4761,8 +4970,25 @@ export async function GET(
       of searchTerms
     ) {
 
+      /*
+       * 의미 별칭(alias)은 기준 위치의 동(area3)까지 포함합니다.
+       *
+       * 예:
+       * 대전광역시 서구 둔산동 제육
+       *
+       * 이렇게 해야 상호명에 메뉴명이 없더라도
+       * 가까운 백반집/한식집이 NAVER 후보군에 들어올 확률이 높아집니다.
+       */
+      const queryArea =
+        searchTerm.kind ===
+          "alias" &&
+        displayArea
+          ? displayArea
+          : localSearchArea;
+
+
       const query =
-        `${localSearchArea} ${searchTerm.name}`;
+        `${queryArea} ${searchTerm.name}`;
 
 
       const searchUrl =
@@ -5215,13 +5441,11 @@ export async function GET(
       /* ---------------------------------------------------
          최종 추천 점수
 
-         현재는 가격 데이터가 없으므로:
-
          메뉴 취향 70%
          거리      30%
 
-         추후:
-         메뉴 + 가격 + 거리
+         가격은 추천 점수에 반영하지 않습니다.
+         가격은 별도 표시와 예산 필터에만 사용합니다.
       --------------------------------------------------- */
 
       const recommendScore =
@@ -5249,6 +5473,19 @@ export async function GET(
 
         category:
           item.category,
+
+        venueType:
+          getRestaurantVenueType(
+            item
+          ),
+
+        venueTypeLabel:
+          getRestaurantVenueType(
+            item
+          ) ===
+          "bar"
+            ? "술집"
+            : "음식점",
 
         address:
           item.address,
@@ -5308,15 +5545,13 @@ export async function GET(
     /*
      * 가격 resolver
      *
-     * 1) 해당 음식점의 검증된 실제 메뉴 가격
-     * 2) 없으면 지역 평균가
+     * 1) 해당 음식점의 검증된 실제 추천 메뉴 가격
+     * 2) 없으면 같은 메뉴의 지역 평균가
+     * 3) 둘 다 없으면 가격 정보 없음
      *
-     * 실제 가격 + 지역 평균 비교가 가능한 경우:
-     * 추천점수 = 취향 50% + 가격 30% + 거리 20%
-     *
-     * 비교자료가 부족하면 기존:
-     * 취향 70% + 거리 30%
-     * 점수를 그대로 유지합니다.
+     * 중요:
+     * 가격은 recommendScore에 반영하지 않습니다.
+     * 프론트에서 가격 표시와 "예산맞춤" 필터에만 사용합니다.
      */
     const pricedRestaurants =
       await attachRestaurantPrices(

@@ -1,5 +1,4 @@
 "use client";
-import Image from "next/image";
 
 import {
   ChangeEvent,
@@ -10,6 +9,13 @@ import {
 import {
   useRouter,
 } from "next/navigation";
+
+import {
+  AppHeader,
+  AppShell,
+  PageIntro,
+  SectionHeader
+} from "@/components/JummechuUI";
 
 const PROFILE_AVATARS = [
   {
@@ -267,18 +273,16 @@ export default function MyPage() {
 
   async function handleLogout() {
     try {
-      const response = await fetch(
+      await fetch(
         "/api/logout",
         {
           method: "POST",
         }
       );
 
-      if (!response.ok) throw new Error("로그아웃에 실패했습니다. 다시 시도해주세요.");
-      localStorage.removeItem("jummechu_preferences");
-      localStorage.removeItem("jummechu_saved_locations");
-      localStorage.removeItem("jummechu_location");
-      localStorage.removeItem("jummechu_user");
+      localStorage.removeItem(
+        "jummechu_user"
+      );
 
       router.replace("/");
       router.refresh();
@@ -287,7 +291,6 @@ export default function MyPage() {
         "로그아웃 오류:",
         error
       );
-      alert("로그아웃에 실패했습니다. 다시 시도해주세요.");
     }
   }
 
@@ -377,11 +380,16 @@ export default function MyPage() {
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-[#faf8f5]">
-        <p className="text-sm text-gray-400">
-          사용자 정보를 불러오는 중...
-        </p>
-      </main>
+      <AppShell>
+        <div className="flex min-h-screen items-center justify-center">
+          <div className="text-center">
+            <div className="mx-auto h-9 w-9 animate-spin rounded-full border-4 border-gray-200 border-t-orange-500" />
+            <p className="mt-4 text-sm font-medium text-gray-400">
+              사용자 정보를 불러오는 중...
+            </p>
+          </div>
+        </div>
+      </AppShell>
     );
   }
 
@@ -402,44 +410,33 @@ export default function MyPage() {
 
   return (
     <>
-      <main className="min-h-screen bg-[#faf8f5] px-5 py-7">
-        <div className="mx-auto w-full max-w-md">
-          {/* HEADER */}
-          <header className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() =>
-                router.back()
-              }
-              className="flex h-9 w-9 items-center justify-center text-2xl text-gray-700"
-              aria-label="뒤로가기"
-            >
-              ‹
-            </button>
+      <AppShell>
+        <AppHeader
+          eyebrow="PROFILE"
+          title="마이페이지"
+          onBack={() => router.back()}
+        />
 
-            <h1 className="text-base font-extrabold text-gray-900">
-              마이페이지
-            </h1>
-
-            <div className="h-9 w-9" />
-          </header>
+        <div className="px-4 pb-24 pt-5">
+          <PageIntro
+            eyebrow="MY JUMMECHU"
+            title="내 정보와 취향을 관리해요"
+            description="프로필, 음식 취향, 계정 설정을 한 곳에서 관리할 수 있어요."
+          />
 
           {/* PROFILE */}
-          <section className="mt-8 rounded-3xl bg-white p-5 shadow-sm">
+          <section className="mt-5 rounded-3xl border border-orange-100 bg-gradient-to-br from-orange-50 to-white p-5 shadow-sm">
             <div className="flex items-center">
               <button
                 type="button"
                 onClick={() =>
                   setShowProfileModal(true)
                 }
-                className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-full"
+                className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-2xl ring-4 ring-white shadow-sm"
                 aria-label="프로필 사진 변경"
               >
                 {user.profileImageUrl ? (
-                  <Image
-                    width={64}
-                    height={64}
-                    unoptimized
+                  <img
                     src={user.profileImageUrl}
                     alt="프로필"
                     className="h-full w-full object-cover"
@@ -471,7 +468,7 @@ export default function MyPage() {
                   onClick={() =>
                     setShowProfileModal(true)
                   }
-                  className="mt-2 text-xs font-bold text-orange-500"
+                  className="mt-2 inline-flex rounded-full bg-orange-100 px-2.5 py-1 text-[11px] font-extrabold text-orange-600"
                 >
                   프로필 변경
                 </button>
@@ -480,12 +477,13 @@ export default function MyPage() {
           </section>
 
           {/* 계정 메뉴 */}
-          <section className="mt-6">
-            <p className="mb-3 text-xs font-bold text-gray-400">
-              계정
-            </p>
+          <section className="mt-7">
+            <SectionHeader
+              title="내 설정"
+              subtitle="추천에 사용하는 취향과 계정을 관리해요."
+            />
 
-            <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
+            <div className="mt-3 overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-sm">
               <button
                 type="button"
                 onClick={() =>
@@ -493,9 +491,11 @@ export default function MyPage() {
                     "/preferences"
                   )
                 }
-                className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-4 text-left transition hover:bg-gray-50"
+                className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-[18px] text-left transition hover:bg-orange-50/50"
               >
-                <div>
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-orange-50 text-lg">🍽️</div>
+                  <div>
                   <p className="text-sm font-bold text-gray-800">
                     음식 취향 설정
                   </p>
@@ -503,6 +503,7 @@ export default function MyPage() {
                   <p className="mt-1 text-xs text-gray-400">
                     선호 메뉴를 변경해요.
                   </p>
+                  </div>
                 </div>
 
                 <span className="text-gray-300">
@@ -513,9 +514,11 @@ export default function MyPage() {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="flex w-full items-center justify-between px-5 py-4 text-left transition hover:bg-gray-50"
+                className="flex w-full items-center justify-between px-5 py-[18px] text-left transition hover:bg-orange-50/50"
               >
-                <div>
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gray-50 text-lg">↪️</div>
+                  <div>
                   <p className="text-sm font-bold text-gray-800">
                     로그아웃
                   </p>
@@ -523,6 +526,7 @@ export default function MyPage() {
                   <p className="mt-1 text-xs text-gray-400">
                     현재 계정에서 로그아웃합니다.
                   </p>
+                  </div>
                 </div>
 
                 <span className="text-gray-300">
@@ -533,12 +537,13 @@ export default function MyPage() {
           </section>
 
           {/* 계정 관리 */}
-          <section className="mt-8">
-            <p className="mb-3 text-xs font-bold text-red-400">
-              계정 관리
-            </p>
+          <section className="mt-7">
+            <SectionHeader
+              title="계정 관리"
+              subtitle="탈퇴 전 삭제되는 정보를 꼭 확인해주세요."
+            />
 
-            <div className="rounded-2xl bg-white p-5 shadow-sm">
+            <div className="mt-3 rounded-3xl border border-red-100 bg-red-50/40 p-5">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-sm font-bold text-gray-800">
@@ -567,12 +572,12 @@ export default function MyPage() {
             </div>
           </section>
         </div>
-      </main>
+      </AppShell>
 
       {/* 프로필 선택 MODAL */}
       {showProfileModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 px-5">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-950/45 px-5 backdrop-blur-[2px]">
+          <div className="w-full max-w-sm rounded-[28px] border border-gray-100 bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-extrabold text-gray-900">
@@ -683,8 +688,8 @@ export default function MyPage() {
 
       {/* 회원탈퇴 MODAL */}
       {showDeleteModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 px-5">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-950/45 px-5 backdrop-blur-[2px]">
+          <div className="w-full max-w-sm rounded-[28px] border border-gray-100 bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-extrabold text-gray-900">

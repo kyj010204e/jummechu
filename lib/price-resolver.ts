@@ -11,20 +11,19 @@ export type RestaurantPriceSource =
 
 export type RestaurantPriceFields = {
   /*
-   * 가격 판단에 사용한 메뉴
+   * 가격 판단에 사용한 추천 메뉴
    */
   priceMenuName:
     string | null;
 
   /*
-   * 화면에 표시할 가격
+   * 화면 표시 및 예산 필터에 사용할 가격.
    *
    * direct:
-   *   실제 검증된 가게 메뉴 가격
+   *   해당 가게의 확인된 실제 추천 메뉴 가격
    *
    * regional:
-   *   해당 가게 직접 가격이 없을 때
-   *   지역 평균 가격
+   *   직접 가격이 없을 때 같은 메뉴의 지역 평균 가격
    */
   priceKrw:
     number | null;
@@ -42,8 +41,7 @@ export type RestaurantPriceFields = {
     number | null;
 
   /*
-   * 기존 가격 데이터 ID.
-   * 추후 가격 수정 제보 시 연결할 수 있습니다.
+   * 기존 실제 가격 데이터 ID
    */
   restaurantMenuPriceId:
     string | null;
@@ -53,42 +51,6 @@ export type RestaurantPriceFields = {
 
   priceSourceLabel:
     string;
-
-  /*
-   * 0 ~ 100
-   *
-   * 직접 가격 + 지역 평균이 둘 다 있을 때만
-   * 실제 상대 가격을 계산합니다.
-   *
-   * 비교 자료가 없으면 중립값 50.
-   */
-  priceScore:
-    number;
-
-  /*
-   * 메뉴취향 60% + 가격 40%
-   */
-  valueScore:
-    number;
-
-  /*
-   * 직접 가격이 지역 평균보다 몇 % 차이나는지.
-   *
-   * 음수:
-   *   지역 평균보다 저렴
-   *
-   * 양수:
-   *   지역 평균보다 비쌈
-   */
-  priceComparedToRegionalPercent:
-    number | null;
-
-  /*
-   * 실제 가게 가격과 지역 평균을
-   * 비교할 수 있는 상태인지.
-   */
-  priceComparable:
-    boolean;
 };
 
 
@@ -114,15 +76,6 @@ type PriceResolvableRestaurant = {
 
   recommendedMenuScore:
     number | null;
-
-  preferenceScore:
-    number;
-
-  distanceScore:
-    number;
-
-  recommendScore:
-    number;
 };
 
 
@@ -177,26 +130,6 @@ type RegionalPriceRow = {
   updated_at:
     Date | string;
 };
-
-
-const NEUTRAL_PRICE_SCORE =
-  50;
-
-
-function clamp(
-  value: number,
-  min: number,
-  max: number
-) {
-
-  return Math.min(
-    max,
-    Math.max(
-      min,
-      value
-    )
-  );
-}
 
 
 function normalizeText(
@@ -285,90 +218,7 @@ function addressesMatch(
 }
 
 
-function calculatePriceScore(
-  directPrice:
-    number | null,
-
-  regionalAverage:
-    number | null
-) {
-
-  if (
-    !directPrice ||
-    !regionalAverage ||
-    directPrice <= 0 ||
-    regionalAverage <= 0
-  ) {
-
-    return {
-      score:
-        NEUTRAL_PRICE_SCORE,
-
-      comparable:
-        false,
-
-      differencePercent:
-        null as number | null,
-    };
-  }
-
-
-  const ratio =
-    directPrice /
-    regionalAverage;
-
-
-  /*
-   * v1 가격 점수
-   *
-   * 지역 평균의:
-   *  80% 가격 -> 약 90점
-   * 100% 가격 -> 60점
-   * 120% 가격 -> 30점
-   * 140% 이상 -> 0점
-   *
-   * 지나치게 싼 데이터 하나가
-   * 추천 전체를 지배하지 않도록 100점에서 제한합니다.
-   */
-  const score =
-    clamp(
-      Math.round(
-        60 +
-        (
-          1 -
-          ratio
-        ) *
-        150
-      ),
-      0,
-      100
-    );
-
-
-  const differencePercent =
-    Math.round(
-      (
-        ratio -
-        1
-      ) *
-      100
-    );
-
-
-  return {
-    score,
-    comparable:
-      true,
-
-    differencePercent,
-  };
-}
-
-
-function makeUnknownPriceFields(
-  restaurant:
-    PriceResolvableRestaurant
-):
+function makeUnknownPriceFields():
   RestaurantPriceFields {
 
   return {
@@ -392,31 +242,6 @@ function makeUnknownPriceFields(
 
     priceSourceLabel:
       "가격 정보 없음",
-
-    priceScore:
-      NEUTRAL_PRICE_SCORE,
-
-    valueScore:
-      clamp(
-        Math.round(
-          restaurant
-            .preferenceScore *
-            0.60
-
-          +
-
-          NEUTRAL_PRICE_SCORE *
-            0.40
-        ),
-        0,
-        100
-      ),
-
-    priceComparedToRegionalPercent:
-      null,
-
-    priceComparable:
-      false,
   };
 }
 
@@ -487,9 +312,7 @@ export async function attachRestaurantPrices<
       (restaurant) => ({
         ...restaurant,
 
-        ...makeUnknownPriceFields(
-          restaurant
-        ),
+        ...makeUnknownPriceFields(),
       })
     );
   }
@@ -703,9 +526,7 @@ export async function attachRestaurantPrices<
       (restaurant) => ({
         ...restaurant,
 
-        ...makeUnknownPriceFields(
-          restaurant
-        ),
+        ...makeUnknownPriceFields(),
       })
     );
   }
@@ -790,78 +611,6 @@ export async function attachRestaurantPrices<
       }
 
 
-      const priceResult =
-        calculatePriceScore(
-          selectedDirect
-            ?.price_krw ??
-            null,
-
-          selectedRegional
-            ?.average_price_krw ??
-            null
-        );
-
-
-      const priceScore =
-        priceResult.score;
-
-
-      const valueScore =
-        clamp(
-          Math.round(
-
-            restaurant
-              .preferenceScore *
-              0.60
-
-            +
-
-            priceScore *
-              0.40
-          ),
-          0,
-          100
-        );
-
-
-      /*
-       * 추천 탭:
-       *
-       * 신뢰할 수 있는 직접 가격 + 지역 평균 비교가 가능할 때만
-       * 가격 30%를 최종 추천에 넣습니다.
-       *
-       * 가격 비교자료가 부족하면 기존 추천식
-       * 메뉴 70% + 거리 30%를 그대로 유지합니다.
-       */
-      const recommendScore =
-        priceResult.comparable
-
-          ? clamp(
-              Math.round(
-
-                restaurant
-                  .preferenceScore *
-                  0.50
-
-                +
-
-                priceScore *
-                  0.30
-
-                +
-
-                restaurant
-                  .distanceScore *
-                  0.20
-              ),
-              0,
-              100
-            )
-
-          : restaurant
-              .recommendScore;
-
-
       let priceSource:
         RestaurantPriceSource =
           "unknown";
@@ -907,8 +656,6 @@ export async function attachRestaurantPrices<
       return {
         ...restaurant,
 
-        recommendScore,
-
         priceMenuName:
           selectedMenu,
 
@@ -935,17 +682,6 @@ export async function attachRestaurantPrices<
 
         priceSourceLabel,
 
-        priceScore,
-
-        valueScore,
-
-        priceComparedToRegionalPercent:
-          priceResult
-            .differencePercent,
-
-        priceComparable:
-          priceResult
-            .comparable,
       };
     }
   );
