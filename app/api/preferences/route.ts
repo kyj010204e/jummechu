@@ -330,10 +330,24 @@ export async function GET() {
       selectedMenus,
       favoriteMenus,
 
+      /*
+       * 기존 /map 화면이 preferences 필드를 기준으로
+       * 온보딩 완료 여부를 판단하므로 호환 필드를 함께 반환합니다.
+       */
+      preferences:
+        selectedMenus,
+
       selectedCategoryIds:
         getPreferenceCategoryIds(
           selectedMenus
         ),
+
+      hasPreferences:
+        selectedMenus.length >=
+        MIN_DETAIL_PREFERENCES,
+
+      preferenceCount:
+        selectedMenus.length,
 
       minSelections:
         MIN_DETAIL_PREFERENCES,
@@ -821,8 +835,16 @@ export async function POST(
       selectedMenus,
       favoriteMenus,
 
+      /* /map 및 구버전 클라이언트 호환 */
+      preferences:
+        selectedMenus,
+
       selectedCategoryIds:
         categoryIds,
+
+      hasPreferences:
+        selectedMenus.length >=
+        MIN_DETAIL_PREFERENCES,
 
       preferenceCount:
         selectedMenus.length,
