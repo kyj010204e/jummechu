@@ -208,7 +208,7 @@ export default function ExplorationPanel() {
         }
 
         const menuCount = manualEnabled ? 2 : 1;
-        const menus = (menuData.explorationMenus ?? []).slice(0, menuCount);
+        const menus = menuData.explorationMenus ?? [];
 
         if (menus.length === 0) {
           setPlaces([]);
@@ -216,60 +216,84 @@ export default function ExplorationPanel() {
           return;
         }
 
-        const resolved = await Promise.all(
-          menus.map(async (menu): Promise<ExplorationPlace> => {
-            const params = new URLSearchParams({
-              query: menu.name,
-              latitude: String(location.latitude),
-              longitude: String(location.longitude),
+        /*
+         * 취향 탐험은 "좋아할 법한 메뉴"보다
+         * "지금 실제로 주변에서 먹어볼 수 있는 메뉴"를 우선합니다.
+         *
+         * 서버가 넓게 뽑아준 탐험 후보를 순서대로 확인하고,
+         * 5km 안에 실제 음식점이 검색되는 메뉴만 화면에 남깁니다.
+         * 필요한 개수(자동 1개 / 수동 2개)를 찾는 즉시 검색을 멈춰
+         * NAVER Local Search 요청 수도 불필요하게 늘리지 않습니다.
+         */
+        const resolved: ExplorationPlace[] = [];
+
+        for (const menu of menus) {
+          if (controller.signal.aborted) return;
+
+          const params = new URLSearchParams({
+            query: menu.name,
+            latitude: String(location.latitude),
+            longitude: String(location.longitude),
+          });
+
+          try {
+            const response = await fetch(`/api/location-search?${params.toString()}`, {
+              cache: "no-store",
+              signal: controller.signal,
             });
 
-            try {
-              const response = await fetch(`/api/location-search?${params.toString()}`, {
-                cache: "no-store",
-                signal: controller.signal,
-              });
+            const data = (await response.json()) as LocationSearchResponse;
 
-              const data = (await response.json()) as LocationSearchResponse;
-
-              if (!response.ok) {
-                return { menu, place: null, distance: null };
-              }
-
-              const candidates = (data.results ?? [])
-                .filter((place) => place.source === "local")
-                .map((place) => ({
-                  place,
-                  distance:
-                    typeof place.distance === "number"
-                      ? place.distance
-                      : calculateDistanceMeters(
-                          location.latitude,
-                          location.longitude,
-                          place.latitude,
-                          place.longitude
-                        ),
-                }))
-                .filter((item) => item.distance <= MAX_DISTANCE_METERS)
-                .sort((a, b) => a.distance - b.distance);
-
-              const best = candidates[0];
-
-              return {
-                menu,
-                place: best?.place ?? null,
-                distance: best?.distance ?? null,
-              };
-            } catch (searchError) {
-              if (controller.signal.aborted) throw searchError;
-              return { menu, place: null, distance: null };
+            if (!response.ok) {
+              continue;
             }
-          })
-        );
+
+            const candidates = (data.results ?? [])
+              .filter((place) => place.source === "local")
+              .map((place) => ({
+                place,
+                distance:
+                  typeof place.distance === "number"
+                    ? place.distance
+                    : calculateDistanceMeters(
+                        location.latitude,
+                        location.longitude,
+                        place.latitude,
+                        place.longitude
+                      ),
+              }))
+              .filter((item) => item.distance <= MAX_DISTANCE_METERS)
+              .sort((a, b) => a.distance - b.distance);
+
+            const best = candidates[0];
+
+            if (!best) {
+              continue;
+            }
+
+            resolved.push({
+              menu,
+              place: best.place,
+              distance: best.distance,
+            });
+
+            if (resolved.length >= menuCount) {
+              break;
+            }
+          } catch (searchError) {
+            if (controller.signal.aborted) throw searchError;
+          }
+        }
 
         if (controller.signal.aborted) return;
 
         setPlaces(resolved);
+
+        if (resolved.length === 0) {
+          setError(
+            "5km 안에서 바로 도전해볼 수 있는 탐험 메뉴를 찾지 못했어요. 다른 탐험 메뉴를 눌러 다시 찾아보세요."
+          );
+        }
 
         if (autoExplorationActive && !manualEnabled) {
           localStorage.setItem(LAST_AUTO_KEY, String(Date.now()));
@@ -359,7 +383,7 @@ export default function ExplorationPanel() {
 
                 <h2 className="mt-1 text-lg font-black">익숙한 취향에서 한 걸음만</h2>
                 <p className="mt-1 text-[11px] leading-5 text-violet-100/90">
-                  좋아할 가능성은 유지하면서 다른 요리권·메뉴 계열을 조금 섞어봤어요.
+                  좋아할 가능성은 유지하면서 주변에서 실제로 도전할 수 있는 메뉴만 골라봐요.
                 </p>
               </div>
 
@@ -379,7 +403,7 @@ export default function ExplorationPanel() {
               <div>
                 <p className="text-xs font-black text-violet-800">새로운 메뉴도 추천받기</p>
                 <p className="mt-1 text-[10px] leading-4 text-violet-500">
-                  켜두면 평소 추천과 별도로 최대 2개의 탐험 메뉴를 보여줘요.
+                  켜두면 5km 안에서 실제로 먹어볼 수 있는 새로운 메뉴를 최대 2개 보여줘요.
                 </p>
               </div>
 
@@ -436,7 +460,7 @@ export default function ExplorationPanel() {
                       {menu.reason}
                     </p>
 
-                    {place ? (
+                    {place && (
                       <div className="mt-3 border-t border-violet-100 pt-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
@@ -460,10 +484,6 @@ export default function ExplorationPanel() {
                           이 메뉴 한번 도전해보기 →
                         </a>
                       </div>
-                    ) : (
-                      <p className="mt-3 border-t border-violet-100 pt-3 text-[10px] leading-4 text-gray-400">
-                        5km 안에서 이 메뉴를 명확히 검색할 수 있는 식당은 찾지 못했어요. 메뉴 자체는 탐험 후보로 기억해둘게요.
-                      </p>
                     )}
                   </article>
                 ))}

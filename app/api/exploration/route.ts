@@ -10,7 +10,7 @@ const MEAN_ANCHOR_WEIGHT = 0.1;
 
 const ABSOLUTE_MIN_SCORE = 0.3;
 const RELATIVE_MIN_RATIO = 0.5;
-const MAX_RESULTS = 3;
+const MAX_RESULTS = 12;
 
 type RawTasteRow = {
   embedding_text: string;
