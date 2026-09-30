@@ -13,6 +13,7 @@ type HistoryItem = {
   menuName: string | null;
   source: "recommendation" | "exploration";
   rating: 1 | -1 | null;
+  privateComment: string;
   triedAt: string;
   ratedAt: string | null;
 };
@@ -48,6 +49,7 @@ export default function MealHistoryPage() {
   const [error, setError] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
   const [messageById, setMessageById] = useState<Record<string, string>>({});
+  const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const controller = new AbortController();
@@ -77,7 +79,14 @@ export default function MealHistoryPage() {
         }
 
         if (!controller.signal.aborted) {
-          setHistory(Array.isArray(data.history) ? data.history : []);
+          const nextHistory = Array.isArray(data.history) ? data.history : [];
+
+          setHistory(nextHistory);
+          setCommentDrafts(
+            Object.fromEntries(
+              nextHistory.map((item) => [item.id, item.privateComment ?? ""])
+            )
+          );
         }
       } catch (loadError) {
         if (controller.signal.aborted) return;
@@ -161,6 +170,126 @@ export default function MealHistoryPage() {
     }
   }
 
+  async function savePrivateComment(id: string) {
+    if (savingId) return;
+
+    try {
+      setSavingId(id);
+      setMessageById((current) => ({ ...current, [id]: "" }));
+
+      const privateComment = (commentDrafts[id] ?? "").slice(0, 1000);
+
+      const response = await fetch(`/api/meal-history/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ privateComment }),
+      });
+
+      if (response.status === 401) {
+        router.replace("/login");
+        return;
+      }
+
+      const result = (await response.json()) as {
+        message?: string;
+        privateComment?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(result.message ?? "개인 메모를 저장하지 못했습니다.");
+      }
+
+      const savedComment = result.privateComment ?? privateComment;
+
+      setHistory((current) =>
+        current.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                privateComment: savedComment,
+              }
+            : item
+        )
+      );
+
+      setCommentDrafts((current) => ({
+        ...current,
+        [id]: savedComment,
+      }));
+
+      setMessageById((current) => ({
+        ...current,
+        [id]: result.message ?? "나만 보는 메모를 저장했어요.",
+      }));
+    } catch (commentError) {
+      setMessageById((current) => ({
+        ...current,
+        [id]:
+          commentError instanceof Error
+            ? commentError.message
+            : "개인 메모를 저장하지 못했습니다.",
+      }));
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  async function deleteHistory(id: string) {
+    if (savingId) return;
+
+    const confirmed = window.confirm(
+      "이 먹어보기 기록을 삭제할까요?\n평가로 반영된 취향도 가능한 범위에서 다시 계산됩니다."
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setSavingId(id);
+      setMessageById((current) => ({ ...current, [id]: "" }));
+
+      const response = await fetch(`/api/meal-history/${id}`, {
+        method: "DELETE",
+      });
+
+      if (response.status === 401) {
+        router.replace("/login");
+        return;
+      }
+
+      const result = (await response.json()) as {
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(result.message ?? "먹어보기 기록을 삭제하지 못했습니다.");
+      }
+
+      setHistory((current) => current.filter((item) => item.id !== id));
+      setCommentDrafts((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      setMessageById((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    } catch (deleteError) {
+      setMessageById((current) => ({
+        ...current,
+        [id]:
+          deleteError instanceof Error
+            ? deleteError.message
+            : "먹어보기 기록을 삭제하지 못했습니다.",
+      }));
+    } finally {
+      setSavingId(null);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-[#f8f7f3] px-4 py-6">
       <section className="mx-auto w-full max-w-[560px] rounded-[30px] bg-white p-5 shadow-sm sm:p-7">
@@ -178,7 +307,10 @@ export default function MealHistoryPage() {
               🍽️ 먹어본 기록
             </h1>
             <p className="mt-2 text-sm leading-6 text-gray-500">
-              일반 추천과 취향 탐험에서 먹어보기를 선택한 모든 기록이에요.
+              일반 추천과 취향 탐험에서 저장한 식사 기록이에요.
+            </p>
+            <p className="mt-1 text-xs leading-5 text-gray-400">
+              🔒 개인 메모는 현재 본인 계정에서만 확인할 수 있어요.
             </p>
           </div>
 
@@ -218,7 +350,7 @@ export default function MealHistoryPage() {
               아직 먹어본 기록이 없어요.
             </p>
             <p className="mt-1 text-xs leading-5 text-gray-400">
-              추천 카드의 먹어보기 버튼이나 카드 더블클릭으로 시작할 수 있어요.
+              추천 카드의 먹어보기 버튼이나 카드 더블클릭 후 저장하기를 눌러주세요.
             </p>
             <button
               type="button"
@@ -235,6 +367,8 @@ export default function MealHistoryPage() {
             {history.map((item) => {
               const saving = savingId === item.id;
               const message = messageById[item.id];
+              const commentDraft = commentDrafts[item.id] ?? "";
+              const commentChanged = commentDraft !== (item.privateComment ?? "");
 
               return (
                 <article
@@ -321,6 +455,45 @@ export default function MealHistoryPage() {
                     </button>
                   </div>
 
+                  <div className="mt-4 rounded-2xl bg-gray-50 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-black text-gray-600">
+                        🔒 나만 보는 메모
+                      </p>
+                      <span className="text-[10px] text-gray-300">
+                        {commentDraft.length}/1000
+                      </span>
+                    </div>
+
+                    <textarea
+                      value={commentDraft}
+                      maxLength={1000}
+                      disabled={saving}
+                      onChange={(event) =>
+                        setCommentDrafts((current) => ({
+                          ...current,
+                          [item.id]: event.target.value,
+                        }))
+                      }
+                      placeholder="맛, 분위기, 재방문하고 싶은 메뉴 등을 적어보세요."
+                      className="mt-2 min-h-20 w-full resize-none rounded-xl border border-gray-100 bg-white px-3 py-2 text-xs leading-5 text-gray-700 outline-none placeholder:text-gray-300 focus:border-orange-200"
+                    />
+
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <p className="text-[10px] text-gray-400">
+                        다른 사용자에게 공개되지 않아요.
+                      </p>
+                      <button
+                        type="button"
+                        disabled={saving || !commentChanged}
+                        onClick={() => void savePrivateComment(item.id)}
+                        className="rounded-lg bg-white px-3 py-1.5 text-[11px] font-black text-orange-500 shadow-sm disabled:cursor-not-allowed disabled:text-gray-300 disabled:shadow-none"
+                      >
+                        메모 저장
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="mt-3 flex items-center justify-between gap-3">
                     <a
                       href={buildNaverMapLink(item)}
@@ -331,12 +504,21 @@ export default function MealHistoryPage() {
                       네이버 지도에서 보기 →
                     </a>
 
-                    {item.ratedAt && (
-                      <span className="text-[10px] text-gray-300">
-                        평가 {formatDate(item.ratedAt)}
-                      </span>
-                    )}
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void deleteHistory(item.id)}
+                      className="text-xs font-bold text-rose-400 transition hover:text-rose-600 disabled:opacity-40"
+                    >
+                      기록 삭제
+                    </button>
                   </div>
+
+                  {item.ratedAt && (
+                    <p className="mt-2 text-right text-[10px] text-gray-300">
+                      평가 {formatDate(item.ratedAt)}
+                    </p>
+                  )}
 
                   {message && (
                     <p className="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-[11px] leading-5 text-gray-500">

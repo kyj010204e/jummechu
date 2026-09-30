@@ -3,10 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   createMealHistoryEntry,
   ensureMealHistoryTable,
+  normalizeMealHistoryRating,
 } from "@/lib/meal-history";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
 import { getUserId } from "@/lib/session";
+import {
+  rebuildUserTasteEmbeddingWithFeedback,
+  upsertRecommendationFeedback,
+} from "@/lib/taste-feedback";
 
 export async function GET(request: NextRequest) {
   try {
@@ -62,6 +67,7 @@ export async function GET(request: NextRequest) {
         menu_name: string | null;
         source: string;
         rating: number | null;
+        private_comment: string;
         tried_at: Date;
         rated_at: Date | null;
       }>
@@ -76,6 +82,7 @@ export async function GET(request: NextRequest) {
         menu_name,
         source,
         rating,
+        private_comment,
         tried_at,
         rated_at
       FROM meal_history
@@ -103,6 +110,7 @@ export async function GET(request: NextRequest) {
             : row.rating === -1
               ? -1
               : null,
+        privateComment: row.private_comment ?? "",
         triedAt: row.tried_at.toISOString(),
         ratedAt: row.rated_at?.toISOString() ?? null,
       })),
@@ -147,8 +155,12 @@ export async function POST(request: NextRequest) {
           foodId?: unknown;
           menuName?: unknown;
           source?: unknown;
+          rating?: unknown;
+          privateComment?: unknown;
         }
       | null;
+
+    const rating = normalizeMealHistoryRating(body?.rating);
 
     const entry = await createMealHistoryEntry({
       userId,
@@ -160,6 +172,8 @@ export async function POST(request: NextRequest) {
       foodId: body?.foodId,
       menuName: body?.menuName,
       source: body?.source,
+      rating,
+      privateComment: body?.privateComment,
     });
 
     if (!entry) {
@@ -169,10 +183,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    let tasteUpdated = false;
+
+    if (rating && entry.foodId) {
+      const saved = await upsertRecommendationFeedback({
+        userId,
+        foodId: BigInt(entry.foodId),
+        rating,
+        source: "meal_history",
+      });
+
+      if (saved) {
+        tasteUpdated =
+          await rebuildUserTasteEmbeddingWithFeedback(userId);
+      }
+    }
+
     return NextResponse.json({
       success: true,
       entry,
-      message: "먹어보기 기록에 추가했어요. 식사 후 평가를 남겨주세요.",
+      tasteUpdated,
+      message: rating
+        ? "먹어보기 기록과 평가를 저장했어요."
+        : "먹어보기 기록을 저장했어요. 평가는 나중에 남겨도 돼요.",
     });
   } catch (error) {
     console.error("Meal history POST error:", error);

@@ -734,7 +734,7 @@ export default function ExplorationPanel() {
                     <article
                       key={menu.id}
                       onDoubleClick={() => openMealTry(item)}
-                      title="더블클릭하면 먹어보기에 추가돼요"
+                      title="더블클릭하면 먹어보기 창이 열려요"
                       className="cursor-pointer rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50/80 to-white p-4"
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -823,7 +823,7 @@ export default function ExplorationPanel() {
                         </div>
 
                         <p className="mt-2 text-[10px] leading-4 text-gray-400">
-                          카드를 두 번 눌러도 먹어보기 기록에 추가돼요. 먹은 뒤 평가는 히스토리에서도 언제든 남길 수 있어요.
+                          카드를 두 번 누르면 먹어보기 창이 열려요. 저장하기를 눌러야 기록되고, 평가는 히스토리에서도 언제든 남길 수 있어요.
                         </p>
                       </div>
                     </article>

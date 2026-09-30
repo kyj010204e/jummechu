@@ -14,6 +14,7 @@ export type MealHistoryEntry = {
   menuName: string | null;
   source: MealHistorySource;
   rating: 1 | -1 | null;
+  privateComment: string;
   triedAt: string;
   ratedAt: string | null;
 };
@@ -22,8 +23,14 @@ function normalizeSource(value: unknown): MealHistorySource {
   return value === "exploration" ? "exploration" : "recommendation";
 }
 
-function cleanText(value: unknown, maxLength: number) {
+export function cleanMealHistoryText(value: unknown, maxLength: number) {
   return String(value ?? "").trim().slice(0, maxLength);
+}
+
+export function normalizeMealHistoryRating(value: unknown): 1 | -1 | null {
+  if (value === 1 || value === "like") return 1;
+  if (value === -1 || value === "dislike") return -1;
+  return null;
 }
 
 export async function ensureMealHistoryTable() {
@@ -42,10 +49,26 @@ export async function ensureMealHistoryTable() {
           menu_name TEXT,
           source TEXT NOT NULL DEFAULT 'recommendation',
           rating SMALLINT CHECK (rating IN (-1, 1)),
+          private_comment TEXT NOT NULL DEFAULT '',
           tried_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
           rated_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
+      `);
+
+      /*
+       * 기존 운영 DB에 meal_history가 이미 있어도 안전하게 확장합니다.
+       * private_comment는 현재 사용자 본인만 조회/수정할 수 있는 개인 메모입니다.
+       */
+      await prisma.$executeRawUnsafe(`
+        ALTER TABLE meal_history
+        ADD COLUMN IF NOT EXISTS private_comment TEXT NOT NULL DEFAULT ''
+      `);
+
+      await prisma.$executeRawUnsafe(`
+        ALTER TABLE meal_history
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
       `);
 
       await prisma.$executeRawUnsafe(`
@@ -75,8 +98,8 @@ export async function resolveFoodForMeal(args: {
   foodId?: unknown;
   menuName?: unknown;
 }) {
-  const foodIdText = cleanText(args.foodId, 40);
-  const menuName = cleanText(args.menuName, 120);
+  const foodIdText = cleanMealHistoryText(args.foodId, 40);
+  const menuName = cleanMealHistoryText(args.menuName, 120);
 
   if (/^\d+$/.test(foodIdText)) {
     const rows = await prisma.$queryRaw<
@@ -131,15 +154,19 @@ export async function createMealHistoryEntry(args: {
   foodId?: unknown;
   menuName?: unknown;
   source?: unknown;
+  rating?: unknown;
+  privateComment?: unknown;
 }) {
   await ensureMealHistoryTable();
 
-  const clientAttemptId = cleanText(args.clientAttemptId, 100);
-  const restaurantKey = cleanText(args.restaurantKey, 500);
-  const restaurantName = cleanText(args.restaurantName, 180);
-  const roadAddress = cleanText(args.roadAddress, 300);
-  const address = cleanText(args.address, 300);
+  const clientAttemptId = cleanMealHistoryText(args.clientAttemptId, 100);
+  const restaurantKey = cleanMealHistoryText(args.restaurantKey, 500);
+  const restaurantName = cleanMealHistoryText(args.restaurantName, 180);
+  const roadAddress = cleanMealHistoryText(args.roadAddress, 300);
+  const address = cleanMealHistoryText(args.address, 300);
   const source = normalizeSource(args.source);
+  const rating = normalizeMealHistoryRating(args.rating);
+  const privateComment = cleanMealHistoryText(args.privateComment, 1000);
 
   if (!clientAttemptId || !restaurantKey || !restaurantName) {
     return null;
@@ -161,6 +188,7 @@ export async function createMealHistoryEntry(args: {
       menu_name: string | null;
       source: string;
       rating: number | null;
+      private_comment: string;
       tried_at: Date;
       rated_at: Date | null;
     }>
@@ -176,8 +204,12 @@ export async function createMealHistoryEntry(args: {
       food_id,
       menu_name,
       source,
+      rating,
+      private_comment,
       tried_at,
-      created_at
+      rated_at,
+      created_at,
+      updated_at
     )
     VALUES
     (
@@ -190,12 +222,26 @@ export async function createMealHistoryEntry(args: {
       ${resolvedFood.foodId},
       ${resolvedFood.menuName},
       ${source},
+      ${rating},
+      ${privateComment},
+      CURRENT_TIMESTAMP,
+      ${rating ? new Date() : null},
       CURRENT_TIMESTAMP,
       CURRENT_TIMESTAMP
     )
     ON CONFLICT (user_id, client_attempt_id)
     DO UPDATE SET
-      restaurant_key = EXCLUDED.restaurant_key
+      restaurant_key = EXCLUDED.restaurant_key,
+      restaurant_name = EXCLUDED.restaurant_name,
+      road_address = EXCLUDED.road_address,
+      address = EXCLUDED.address,
+      food_id = EXCLUDED.food_id,
+      menu_name = EXCLUDED.menu_name,
+      source = EXCLUDED.source,
+      rating = EXCLUDED.rating,
+      private_comment = EXCLUDED.private_comment,
+      rated_at = EXCLUDED.rated_at,
+      updated_at = CURRENT_TIMESTAMP
     RETURNING
       id,
       restaurant_key,
@@ -206,6 +252,7 @@ export async function createMealHistoryEntry(args: {
       menu_name,
       source,
       rating,
+      private_comment,
       tried_at,
       rated_at
   `;
@@ -223,6 +270,7 @@ export async function createMealHistoryEntry(args: {
     menuName: row.menu_name,
     source: normalizeSource(row.source),
     rating: row.rating === 1 ? 1 : row.rating === -1 ? -1 : null,
+    privateComment: row.private_comment ?? "",
     triedAt: row.tried_at.toISOString(),
     ratedAt: row.rated_at?.toISOString() ?? null,
   } satisfies MealHistoryEntry;

@@ -20,6 +20,7 @@ type CreatedEntry = {
   menuName: string | null;
   foodId: string | null;
   rating: 1 | -1 | null;
+  privateComment: string;
 };
 
 type MealTryModalProps = {
@@ -28,6 +29,14 @@ type MealTryModalProps = {
   onRecorded?: (restaurantKey: string) => void;
   onRated?: (rating: 1 | -1) => void;
 };
+
+function createAttemptToken() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 export default function MealTryModal({
   target,
@@ -38,9 +47,9 @@ export default function MealTryModal({
   const router = useRouter();
 
   const [entry, setEntry] = useState<CreatedEntry | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [savingRating, setSavingRating] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [rating, setRating] = useState<1 | -1 | null>(null);
+  const [privateComment, setPrivateComment] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -48,21 +57,16 @@ export default function MealTryModal({
     signature: string;
     token: string;
   } | null>(null);
-  const notifiedAttemptTokenRef = useRef<string | null>(null);
-  const onRecordedRef = useRef(onRecorded);
-
-  useEffect(() => {
-    onRecordedRef.current = onRecorded;
-  }, [onRecorded]);
 
   useEffect(() => {
     if (!target) {
       attemptRef.current = null;
-      notifiedAttemptTokenRef.current = null;
       setEntry(null);
       setRating(null);
+      setPrivateComment("");
       setMessage("");
       setError("");
+      setSaving(false);
       return;
     }
 
@@ -76,23 +80,31 @@ export default function MealTryModal({
     if (attemptRef.current?.signature !== signature) {
       attemptRef.current = {
         signature,
-        token:
-          typeof crypto !== "undefined" && "randomUUID" in crypto
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        token: createAttemptToken(),
       };
     }
 
-    const controller = new AbortController();
+    /*
+     * 중요: 모달을 여는 것만으로는 DB에 저장하지 않습니다.
+     * 사용자가 아래의 "저장하기" 버튼을 눌렀을 때만 기록됩니다.
+     */
+    setEntry(null);
+    setRating(null);
+    setPrivateComment("");
+    setMessage("");
+    setError("");
+    setSaving(false);
+  }, [target]);
 
-    async function recordTry() {
-      try {
-        setLoading(true);
-        setEntry(null);
-        setRating(null);
-        setMessage("");
-        setError("");
+  async function saveRecord() {
+    if (!target || saving) return;
 
+    try {
+      setSaving(true);
+      setError("");
+      setMessage("");
+
+      if (!entry) {
         const response = await fetch("/api/meal-history", {
           method: "POST",
           headers: {
@@ -100,15 +112,16 @@ export default function MealTryModal({
           },
           body: JSON.stringify({
             clientAttemptId: attemptRef.current?.token,
-            restaurantKey: target!.restaurantKey,
-            restaurantName: target!.restaurantName,
-            roadAddress: target!.roadAddress ?? "",
-            address: target!.address ?? "",
-            foodId: target!.foodId ?? null,
-            menuName: target!.menuName ?? null,
-            source: target!.source,
+            restaurantKey: target.restaurantKey,
+            restaurantName: target.restaurantName,
+            roadAddress: target.roadAddress ?? "",
+            address: target.address ?? "",
+            foodId: target.foodId ?? null,
+            menuName: target.menuName ?? null,
+            source: target.source,
+            rating,
+            privateComment,
           }),
-          signal: controller.signal,
         });
 
         if (response.status === 401) {
@@ -125,61 +138,36 @@ export default function MealTryModal({
           throw new Error(result.message ?? "먹어보기 기록을 저장하지 못했습니다.");
         }
 
-        if (controller.signal.aborted) return;
-
         setEntry(result.entry);
         setRating(result.entry.rating);
-        setMessage(result.message ?? "먹어보기 기록에 추가했어요.");
+        setPrivateComment(result.entry.privateComment ?? "");
+        setMessage(result.message ?? "먹어보기 기록을 저장했어요.");
 
-        const currentToken = attemptRef.current?.token ?? null;
-        if (
-          currentToken &&
-          notifiedAttemptTokenRef.current !== currentToken
-        ) {
-          notifiedAttemptTokenRef.current = currentToken;
-          onRecordedRef.current?.(result.entry.restaurantKey);
-
-          window.dispatchEvent(
-            new CustomEvent("jummechu:meal-history-updated", {
-              detail: {
-                restaurantKey: result.entry.restaurantKey,
-              },
-            })
-          );
+        onRecorded?.(result.entry.restaurantKey);
+        if (result.entry.rating) {
+          onRated?.(result.entry.rating);
         }
-      } catch (recordError) {
-        if (controller.signal.aborted) return;
 
-        setError(
-          recordError instanceof Error
-            ? recordError.message
-            : "먹어보기 기록을 저장하지 못했습니다."
+        window.dispatchEvent(
+          new CustomEvent("jummechu:meal-history-updated", {
+            detail: {
+              restaurantKey: result.entry.restaurantKey,
+            },
+          })
         );
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
+
+        return;
       }
-    }
-
-    void recordTry();
-
-    return () => controller.abort();
-  }, [target, router]);
-
-  async function submitRating(nextRating: 1 | -1) {
-    if (!entry || savingRating) return;
-
-    try {
-      setSavingRating(true);
-      setError("");
 
       const response = await fetch(`/api/meal-history/${entry.id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ rating: nextRating }),
+        body: JSON.stringify({
+          ...(rating ? { rating } : {}),
+          privateComment,
+        }),
       });
 
       if (response.status === 401) {
@@ -189,29 +177,36 @@ export default function MealTryModal({
 
       const result = (await response.json()) as {
         message?: string;
-        rating?: 1 | -1;
+        rating?: 1 | -1 | null;
+        privateComment?: string;
       };
 
       if (!response.ok) {
-        throw new Error(result.message ?? "평가를 저장하지 못했습니다.");
+        throw new Error(result.message ?? "먹어보기 기록을 수정하지 못했습니다.");
       }
 
-      setRating(nextRating);
-      setMessage(
-        result.message ??
-          (nextRating === 1
-            ? "좋았어요를 다음 추천에 반영할게요."
-            : "별로였어요를 다음 추천에서 조금 덜 반영할게요.")
+      setEntry((current) =>
+        current
+          ? {
+              ...current,
+              rating: result.rating ?? current.rating,
+              privateComment: result.privateComment ?? privateComment,
+            }
+          : current
       );
-      onRated?.(nextRating);
-    } catch (ratingError) {
+      setMessage(result.message ?? "변경 내용을 저장했어요.");
+
+      if (rating) {
+        onRated?.(rating);
+      }
+    } catch (saveError) {
       setError(
-        ratingError instanceof Error
-          ? ratingError.message
-          : "평가를 저장하지 못했습니다."
+        saveError instanceof Error
+          ? saveError.message
+          : "먹어보기 기록을 저장하지 못했습니다."
       );
     } finally {
-      setSavingRating(false);
+      setSaving(false);
     }
   }
 
@@ -247,83 +242,122 @@ export default function MealTryModal({
         </div>
 
         <div className="mt-4 rounded-2xl bg-orange-50 p-4">
-          {loading ? (
-            <p className="text-sm font-semibold text-orange-600">
-              먹어보기 기록에 추가하는 중...
+          <p className="text-sm font-black text-gray-800">
+            {entry ? "먹어보기 히스토리에 저장됐어요." : "저장하기 전에는 기록되지 않아요."}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-gray-500">
+            실제로 먹은 기록을 남기고, 평가는 지금 또는 히스토리에서 나중에 남길 수 있어요.
+          </p>
+        </div>
+
+        <div className="mt-4">
+          <p className="text-xs font-bold text-gray-500">
+            식사 후 어땠나요? <span className="font-normal text-gray-300">선택</span>
+          </p>
+
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => setRating((current) => (current === 1 && !entry ? null : 1))}
+              className={`rounded-xl px-3 py-3 text-sm font-black transition disabled:opacity-50 ${
+                rating === 1
+                  ? "bg-emerald-500 text-white"
+                  : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+              }`}
+            >
+              👍 좋았어요
+            </button>
+
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => setRating((current) => (current === -1 && !entry ? null : -1))}
+              className={`rounded-xl px-3 py-3 text-sm font-black transition disabled:opacity-50 ${
+                rating === -1
+                  ? "bg-rose-500 text-white"
+                  : "bg-rose-50 text-rose-600 hover:bg-rose-100"
+              }`}
+            >
+              👎 별로였어요
+            </button>
+          </div>
+
+          {!rating && !entry && (
+            <p className="mt-2 text-[10px] leading-4 text-gray-400">
+              평가 없이 저장해도 괜찮아요. 히스토리에서 나중에 평가할 수 있어요.
             </p>
-          ) : error ? (
-            <p className="text-sm leading-6 text-red-500">{error}</p>
-          ) : (
-            <>
-              <p className="text-sm font-black text-gray-800">
-                먹어보기 히스토리에 저장했어요.
-              </p>
-              <p className="mt-1 text-xs leading-5 text-gray-500">
-                실제로 먹은 뒤 평가하면 다음 메뉴 추천의 취향 가중치가 조금씩 바뀌어요.
-              </p>
-            </>
           )}
         </div>
 
-        {entry && (
-          <div className="mt-4">
-            <p className="text-xs font-bold text-gray-500">
-              식사 후 어땠나요?
-            </p>
-
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                disabled={savingRating}
-                onClick={() => void submitRating(1)}
-                className={`rounded-xl px-3 py-3 text-sm font-black transition disabled:opacity-50 ${
-                  rating === 1
-                    ? "bg-emerald-500 text-white"
-                    : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                }`}
-              >
-                👍 좋았어요
-              </button>
-
-              <button
-                type="button"
-                disabled={savingRating}
-                onClick={() => void submitRating(-1)}
-                className={`rounded-xl px-3 py-3 text-sm font-black transition disabled:opacity-50 ${
-                  rating === -1
-                    ? "bg-rose-500 text-white"
-                    : "bg-rose-50 text-rose-600 hover:bg-rose-100"
-                }`}
-              >
-                👎 별로였어요
-              </button>
-            </div>
-
-            {message && (
-              <p className="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-[11px] leading-5 text-gray-500">
-                {message}
-              </p>
-            )}
+        <div className="mt-4">
+          <div className="flex items-center justify-between gap-2">
+            <label
+              htmlFor="meal-private-comment"
+              className="text-xs font-bold text-gray-500"
+            >
+              🔒 나만 보는 메모
+            </label>
+            <span className="text-[10px] text-gray-300">
+              {privateComment.length}/1000
+            </span>
           </div>
+
+          <textarea
+            id="meal-private-comment"
+            value={privateComment}
+            maxLength={1000}
+            disabled={saving}
+            onChange={(event) => setPrivateComment(event.target.value)}
+            placeholder="맛, 분위기, 다음에 먹고 싶은 메뉴 등을 자유롭게 적어보세요."
+            className="mt-2 min-h-24 w-full resize-none rounded-2xl border border-gray-100 bg-gray-50 px-3 py-3 text-sm leading-6 text-gray-700 outline-none transition placeholder:text-gray-300 focus:border-orange-200 focus:bg-white"
+          />
+          <p className="mt-1 text-[10px] leading-4 text-gray-400">
+            이 메모는 현재 본인에게만 보여요. 나중에 리뷰 기능으로 확장할 수 있도록 별도로 저장됩니다.
+          </p>
+        </div>
+
+        {error && (
+          <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-[11px] leading-5 text-red-500">
+            {error}
+          </p>
+        )}
+
+        {message && (
+          <p className="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-[11px] leading-5 text-gray-500">
+            {message}
+          </p>
         )}
 
         <div className="mt-5 grid grid-cols-2 gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl bg-gray-100 py-3 text-sm font-bold text-gray-600"
+            disabled={saving}
+            className="rounded-xl bg-gray-100 py-3 text-sm font-bold text-gray-600 disabled:opacity-50"
           >
-            나중에 평가
+            닫기
           </button>
 
           <button
             type="button"
-            onClick={() => router.push("/meal-history")}
-            className="rounded-xl bg-orange-500 py-3 text-sm font-black text-white transition hover:bg-orange-600"
+            onClick={() => void saveRecord()}
+            disabled={saving}
+            className="rounded-xl bg-orange-500 py-3 text-sm font-black text-white transition hover:bg-orange-600 disabled:opacity-50"
           >
-            먹어본 기록 보기
+            {saving ? "저장 중..." : entry ? "변경 저장" : "저장하기"}
           </button>
         </div>
+
+        {entry && (
+          <button
+            type="button"
+            onClick={() => router.push("/meal-history")}
+            className="mt-3 w-full text-center text-xs font-bold text-orange-500 hover:underline"
+          >
+            먹어본 히스토리에서 확인하기 →
+          </button>
+        )}
       </div>
     </div>
   );

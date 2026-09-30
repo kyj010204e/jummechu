@@ -4464,7 +4464,7 @@ export default function MapPage() {
                           restaurant
                         )
                       }
-                      title="더블클릭하면 먹어보기에 추가돼요"
+                      title="더블클릭하면 먹어보기 창이 열려요"
                       className={`cursor-pointer rounded-2xl border bg-white p-4 transition ${
                         selected
                           ? "border-orange-400 shadow-lg ring-2 ring-orange-100"
