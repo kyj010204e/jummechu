@@ -280,7 +280,8 @@ function normalizeRestaurant(
  * 실제 추천 순서는 사용자가 정한
  * 메뉴 취향 / 거리 가중치로 프론트에서 다시 계산합니다.
  */
-const MAX_RESTAURANT_SEARCH_RADIUS_KM = 5;
+const DEFAULT_RESTAURANT_SEARCH_RADIUS_KM = 5;
+const EXTENDED_RESTAURANT_SEARCH_RADIUS_KM = 8;
 
 const RECOMMENDATION_SETTINGS_KEY =
   "jummechu_recommendation_settings_v1";
@@ -607,6 +608,13 @@ export default function MapPage() {
     restaurantRefreshKey,
     setRestaurantRefreshKey,
   ] = useState(0);
+
+  const [
+    restaurantSearchRadiusKm,
+    setRestaurantSearchRadiusKm,
+  ] = useState(
+    DEFAULT_RESTAURANT_SEARCH_RADIUS_KM
+  );
 
   /*
    * 먹어보기 히스토리 기반 재방문 감점
@@ -1192,6 +1200,19 @@ export default function MapPage() {
     mapLoaded,
   ]);
 
+  /*
+   * 기준 위치가 바뀌면 다시 가까운 5km부터 탐색합니다.
+   * 0건 화면에서 사용자가 직접 확장한 경우에만 8km를 사용합니다.
+   */
+  useEffect(() => {
+    setRestaurantSearchRadiusKm(
+      DEFAULT_RESTAURANT_SEARCH_RADIUS_KM
+    );
+  }, [
+    location?.latitude,
+    location?.longitude,
+  ]);
+
   /* =======================================================
      4. 음식점 API
   ======================================================= */
@@ -1222,7 +1243,7 @@ export default function MapPage() {
             ),
 
             radiusKm: String(
-              MAX_RESTAURANT_SEARCH_RADIUS_KM
+              restaurantSearchRadiusKm
             ),
 
           });
@@ -1311,6 +1332,7 @@ export default function MapPage() {
   }, [
     location,
     restaurantRefreshKey,
+    restaurantSearchRadiusKm,
   ]);
 
   /* =======================================================
@@ -4372,8 +4394,94 @@ export default function MapPage() {
               !restaurantError &&
               sortedRestaurants.length ===
                 0 && (
-                <div className="mt-5 rounded-2xl bg-gray-50 p-5 text-center text-sm text-gray-500">
-                  조건에 맞는 음식점을 찾지 못했어요. 개인설정의 필터를 조금 완화해보세요.
+                <div className="mt-5 rounded-3xl border border-orange-100 bg-gradient-to-br from-orange-50/80 to-white p-5">
+                  <div className="text-center">
+                    <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-xl shadow-sm">
+                      🍽️
+                    </div>
+
+                    <h3 className="mt-3 text-sm font-black text-gray-800">
+                      {restaurants.length > 0
+                        ? "추천 후보는 있지만 현재 조건에 맞는 곳이 없어요."
+                        : `반경 ${restaurantSearchRadiusKm}km 안에서 추천할 음식점을 찾지 못했어요.`}
+                    </h3>
+
+                    <p className="mt-1 text-[11px] leading-5 text-gray-500">
+                      {restaurants.length > 0
+                        ? "예산·주차·술집 같은 개인설정을 조금 완화하거나 다른 위치에서 다시 찾아보세요."
+                        : restaurantSearchRadiusKm <
+                            EXTENDED_RESTAURANT_SEARCH_RADIUS_KM
+                          ? "검색 범위를 넓히거나 지도 중심을 옮기면 새로운 후보를 찾을 수 있어요."
+                          : "8km까지 찾아봤어요. 기준 위치나 선호메뉴를 바꿔 다시 찾아보세요."}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-2">
+                    {restaurantSearchRadiusKm <
+                    EXTENDED_RESTAURANT_SEARCH_RADIUS_KM ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setRestaurantSearchRadiusKm(
+                            EXTENDED_RESTAURANT_SEARCH_RADIUS_KM
+                          )
+                        }
+                        className="rounded-xl bg-orange-500 px-3 py-2.5 text-xs font-black text-white transition hover:bg-orange-600"
+                      >
+                        ↗ 8km로 넓혀보기
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          router.push(
+                            "/location"
+                          )
+                        }
+                        className="rounded-xl bg-orange-500 px-3 py-2.5 text-xs font-black text-white transition hover:bg-orange-600"
+                      >
+                        📍 위치 다시 설정
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode(
+                          "settings"
+                        );
+                        window.scrollTo({
+                          top: 0,
+                          behavior: "smooth",
+                        });
+                      }}
+                      className="rounded-xl border border-orange-100 bg-white px-3 py-2.5 text-xs font-black text-orange-600 transition hover:bg-orange-50"
+                    >
+                      ⚙️ 개인설정 완화
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={
+                        useMapCenterAsLocation
+                      }
+                      className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-xs font-bold text-gray-600 transition hover:bg-gray-50"
+                    >
+                      🗺️ 지도 중심으로 검색
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        router.push(
+                          "/preferences"
+                        )
+                      }
+                      className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-xs font-bold text-gray-600 transition hover:bg-gray-50"
+                    >
+                      🍜 선호메뉴 조정
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -4781,18 +4889,7 @@ export default function MapPage() {
 
                           {/* 링크 */}
 
-                          <div className="mt-3 flex flex-wrap items-center gap-3">
-
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openMealTry(restaurant);
-                              }}
-                              className="rounded-lg bg-orange-500 px-3 py-2 text-xs font-black text-white transition hover:bg-orange-600"
-                            >
-                              🍽️ 먹어보기
-                            </button>
+                          <div className="mt-3 grid grid-cols-2 gap-2">
 
                             <a
                               href={getNaverMapLink(
@@ -4803,11 +4900,22 @@ export default function MapPage() {
                               onClick={(event) => {
                                 event.stopPropagation();
                               }}
-                              className="inline-flex items-center gap-1 text-xs font-semibold text-green-600 hover:underline"
+                              className="inline-flex min-h-10 items-center justify-center gap-1 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-center text-xs font-black text-emerald-700 transition hover:bg-emerald-100"
                             >
                               네이버 지도에서 보기
                               <span>→</span>
                             </a>
+
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openMealTry(restaurant);
+                              }}
+                              className="min-h-10 rounded-xl bg-orange-500 px-3 py-2 text-xs font-black text-white transition hover:bg-orange-600"
+                            >
+                              🍽️ 먹어보기
+                            </button>
 
                             <button
                               type="button"
@@ -4818,11 +4926,11 @@ export default function MapPage() {
                                   restaurant
                                 );
                               }}
-                              className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
+                              className="min-h-10 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600"
                             >
                               {restaurant.businessHours.status ===
                               "UNKNOWN"
-                                ? "영업시간 등록"
+                                ? "영업시간 제보"
                                 : "영업시간 수정"}
                             </button>
 
@@ -4835,7 +4943,7 @@ export default function MapPage() {
                                   restaurant
                                 );
                               }}
-                              className="text-xs font-semibold text-gray-500 underline decoration-gray-200 underline-offset-4 transition hover:text-orange-500"
+                              className="min-h-10 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600"
                             >
                               {restaurant.priceSource ===
                               "direct"
