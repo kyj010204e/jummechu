@@ -3423,23 +3423,57 @@ function buildNaverSearchTerms(
   ];
 
 
+  /*
+   * 특정 상위 메뉴 하나가 alias 슬롯을 모두 차지하지 않도록
+   * 메뉴별 검색어를 round-robin으로 배치합니다.
+   *
+   * getSemanticRestaurantSearchAliases()의 첫 번째 값은
+   * "돼지고기수육 -> 수육", "치즈돈가스 -> 돈가스"처럼
+   * 실제 음식점 검색에 더 잘 잡히는 대표 메뉴명입니다.
+   */
+  const aliasGroups =
+    aliasSeeds.map(
+      (seed) => ({
+        seed,
+        aliases:
+          getSemanticRestaurantSearchAliases(
+            seed.name
+          ),
+      })
+    );
+
+
+  const maxAliasDepth =
+    aliasGroups.reduce(
+      (max, group) =>
+        Math.max(
+          max,
+          group.aliases.length
+        ),
+      0
+    );
+
+
   for (
-    const seed
-    of aliasSeeds
+    let aliasIndex = 0;
+    aliasIndex < maxAliasDepth &&
+    aliasCount < NAVER_ALIAS_SEARCH_COUNT;
+    aliasIndex++
   ) {
 
-    const aliases =
-      getSemanticRestaurantSearchAliases(
-        seed.name
-      );
-
-
     for (
-      const alias
-      of aliases
+      const group
+      of aliasGroups
     ) {
 
+      const alias =
+        group.aliases[
+          aliasIndex
+        ];
+
+
       if (
+        !alias ||
         seenQueries.has(
           alias
         )
@@ -3458,11 +3492,11 @@ function buildNaverSearchTerms(
           alias,
 
         sourceMenu:
-          seed.sourceMenu,
+          group.seed.sourceMenu,
 
         score:
           clamp(
-            seed.score - 4,
+            group.seed.score - 4,
             0,
             100
           ),
@@ -3481,14 +3515,6 @@ function buildNaverSearchTerms(
       ) {
         break;
       }
-    }
-
-
-    if (
-      aliasCount >=
-      NAVER_ALIAS_SEARCH_COUNT
-    ) {
-      break;
     }
   }
 

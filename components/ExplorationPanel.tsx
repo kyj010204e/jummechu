@@ -3,6 +3,10 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  getSemanticRestaurantSearchAliases,
+} from "@/lib/restaurant-search-terms";
+
 const ENABLED_KEY = "jummechu_exploration_enabled_v1";
 const LAST_AUTO_KEY = "jummechu_exploration_last_auto_v1";
 const LOCATION_KEY = "jummechu_location";
@@ -155,30 +159,31 @@ function buildSearchQueries(menu: ExplorationMenu) {
 
   addQuery(queries, seen, menu.name, "exact");
 
-  const replacements: Array<[RegExp, string]> = [
-    [/돈가스/g, "돈까스"],
-    [/돈까스/g, "돈가스"],
-    [/돈카츠/g, "돈까스"],
-    [/라면/g, "라멘"],
-    [/라멘/g, "라면"],
-    [/짜장/g, "자장"],
-    [/자장/g, "짜장"],
-    [/초밥/g, "스시"],
-    [/스시/g, "초밥"],
-    [/소고기/g, "쇠고기"],
-    [/쇠고기/g, "소고기"],
-    [/돼지고기/g, "돼지"],
-  ];
-
-  for (const [pattern, replacement] of replacements) {
-    if (pattern.test(menu.name)) {
-      addQuery(
-        queries,
-        seen,
-        menu.name.replace(pattern, replacement),
-        "alias"
-      );
-    }
+  /*
+   * 일반 추천과 탐험 추천이 같은 검색 정규화 규칙을 사용합니다.
+   *
+   * 예:
+   * 돼지고기수육       -> 수육
+   * 치즈돈가스         -> 돈가스 / 돈까스
+   * 돼지고기김치찌개   -> 김치찌개
+   * 고등어양념구이     -> 고등어구이
+   * 김치볶음밥         -> 볶음밥
+   *
+   * 화면에는 Food Master의 원래 이름을 유지하고,
+   * 실제 주변 음식점 검색어만 더 일반적인 표현으로 넓힙니다.
+   */
+  for (
+    const alias
+    of getSemanticRestaurantSearchAliases(
+      menu.name
+    )
+  ) {
+    addQuery(
+      queries,
+      seen,
+      alias,
+      "alias"
+    );
   }
 
   if (menu.foodType && menu.foodType !== "기타") {
@@ -202,7 +207,7 @@ function buildSearchQueries(menu: ExplorationMenu) {
     );
   }
 
-  return queries.slice(0, 5);
+  return queries.slice(0, 6);
 }
 
 export default function ExplorationPanel() {
