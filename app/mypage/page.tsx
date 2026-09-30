@@ -10,13 +10,6 @@ import {
   useRouter,
 } from "next/navigation";
 
-import {
-  AppHeader,
-  AppShell,
-  PageIntro,
-  SectionHeader
-} from "@/components/JummechuUI";
-
 const PROFILE_AVATARS = [
   {
     key: "chef",
@@ -87,13 +80,22 @@ export default function MyPage() {
   const [showDeleteModal, setShowDeleteModal] =
     useState(false);
 
-  const [password, setPassword] =
+  const [deleteCode, setDeleteCode] =
     useState("");
+
+  const [deleteCodeSent, setDeleteCodeSent] =
+    useState(false);
+
+  const [sendingDeleteCode, setSendingDeleteCode] =
+    useState(false);
 
   const [deleting, setDeleting] =
     useState(false);
 
   const [deleteError, setDeleteError] =
+    useState("");
+
+  const [deleteInfo, setDeleteInfo] =
     useState("");
 
   /* =========================================================
@@ -295,13 +297,54 @@ export default function MyPage() {
   }
 
   /* =========================================================
-     회원탈퇴
+     회원탈퇴 이메일 인증
   ========================================================= */
 
-  async function handleDeleteAccount() {
-    if (!password) {
+  async function sendDeleteVerificationCode() {
+    try {
+      setSendingDeleteCode(true);
+      setDeleteError("");
+      setDeleteInfo("");
+
+      const response =
+        await fetch(
+          "/api/account/delete-code",
+          {
+            method: "POST",
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ??
+            "인증메일 전송에 실패했습니다."
+        );
+      }
+
+      setDeleteCodeSent(true);
+      setDeleteCode("");
+      setDeleteInfo(
+        data.message ??
+          "인증번호를 전송했습니다."
+      );
+    } catch (error) {
       setDeleteError(
-        "비밀번호를 입력해주세요."
+        error instanceof Error
+          ? error.message
+          : "인증메일 전송 중 문제가 발생했습니다."
+      );
+    } finally {
+      setSendingDeleteCode(false);
+    }
+  }
+
+  async function handleDeleteAccount() {
+    if (!/^\d{6}$/.test(deleteCode)) {
+      setDeleteError(
+        "이메일로 받은 6자리 인증번호를 입력해주세요."
       );
       return;
     }
@@ -312,7 +355,7 @@ export default function MyPage() {
 
       const response =
         await fetch(
-          "/api/account",
+          "/api/account/delete-confirm",
           {
             method: "DELETE",
             headers: {
@@ -320,7 +363,7 @@ export default function MyPage() {
                 "application/json",
             },
             body: JSON.stringify({
-              password,
+              code: deleteCode,
             }),
           }
         );
@@ -360,15 +403,11 @@ export default function MyPage() {
         error
       );
 
-      if (error instanceof Error) {
-        setDeleteError(
-          error.message
-        );
-      } else {
-        setDeleteError(
-          "회원탈퇴 중 문제가 발생했습니다."
-        );
-      }
+      setDeleteError(
+        error instanceof Error
+          ? error.message
+          : "회원탈퇴 중 문제가 발생했습니다."
+      );
     } finally {
       setDeleting(false);
     }
@@ -380,16 +419,11 @@ export default function MyPage() {
 
   if (loading) {
     return (
-      <AppShell>
-        <div className="flex min-h-screen items-center justify-center">
-          <div className="text-center">
-            <div className="mx-auto h-9 w-9 animate-spin rounded-full border-4 border-gray-200 border-t-orange-500" />
-            <p className="mt-4 text-sm font-medium text-gray-400">
-              사용자 정보를 불러오는 중...
-            </p>
-          </div>
-        </div>
-      </AppShell>
+      <main className="flex min-h-screen items-center justify-center bg-[#faf8f5]">
+        <p className="text-sm text-gray-400">
+          사용자 정보를 불러오는 중...
+        </p>
+      </main>
     );
   }
 
@@ -410,29 +444,37 @@ export default function MyPage() {
 
   return (
     <>
-      <AppShell>
-        <AppHeader
-          eyebrow="PROFILE"
-          title="마이페이지"
-          onBack={() => router.back()}
-        />
+      <main className="min-h-screen bg-[#faf8f5] px-5 py-7">
+        <div className="mx-auto w-full max-w-md">
+          {/* HEADER */}
+          <header className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() =>
+                router.back()
+              }
+              className="flex h-9 w-9 items-center justify-center text-2xl text-gray-700"
+              aria-label="뒤로가기"
+            >
+              ‹
+            </button>
 
-        <div className="px-4 pb-24 pt-5">
-          <PageIntro
-            eyebrow="MY JUMMECHU"
-            title="내 정보와 취향을 관리해요"
-            description="프로필, 음식 취향, 계정 설정을 한 곳에서 관리할 수 있어요."
-          />
+            <h1 className="text-base font-extrabold text-gray-900">
+              마이페이지
+            </h1>
+
+            <div className="h-9 w-9" />
+          </header>
 
           {/* PROFILE */}
-          <section className="mt-5 rounded-3xl border border-orange-100 bg-gradient-to-br from-orange-50 to-white p-5 shadow-sm">
+          <section className="mt-8 rounded-3xl bg-white p-5 shadow-sm">
             <div className="flex items-center">
               <button
                 type="button"
                 onClick={() =>
                   setShowProfileModal(true)
                 }
-                className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-2xl ring-4 ring-white shadow-sm"
+                className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-full"
                 aria-label="프로필 사진 변경"
               >
                 {user.profileImageUrl ? (
@@ -468,7 +510,7 @@ export default function MyPage() {
                   onClick={() =>
                     setShowProfileModal(true)
                   }
-                  className="mt-2 inline-flex rounded-full bg-orange-100 px-2.5 py-1 text-[11px] font-extrabold text-orange-600"
+                  className="mt-2 text-xs font-bold text-orange-500"
                 >
                   프로필 변경
                 </button>
@@ -477,13 +519,12 @@ export default function MyPage() {
           </section>
 
           {/* 계정 메뉴 */}
-          <section className="mt-7">
-            <SectionHeader
-              title="내 설정"
-              subtitle="추천에 사용하는 취향과 계정을 관리해요."
-            />
+          <section className="mt-6">
+            <p className="mb-3 text-xs font-bold text-gray-400">
+              계정
+            </p>
 
-            <div className="mt-3 overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-sm">
+            <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
               <button
                 type="button"
                 onClick={() =>
@@ -491,11 +532,9 @@ export default function MyPage() {
                     "/preferences"
                   )
                 }
-                className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-[18px] text-left transition hover:bg-orange-50/50"
+                className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-4 text-left transition hover:bg-gray-50"
               >
-                <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-orange-50 text-lg">🍽️</div>
-                  <div>
+                <div>
                   <p className="text-sm font-bold text-gray-800">
                     음식 취향 설정
                   </p>
@@ -503,7 +542,6 @@ export default function MyPage() {
                   <p className="mt-1 text-xs text-gray-400">
                     선호 메뉴를 변경해요.
                   </p>
-                  </div>
                 </div>
 
                 <span className="text-gray-300">
@@ -514,11 +552,9 @@ export default function MyPage() {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="flex w-full items-center justify-between px-5 py-[18px] text-left transition hover:bg-orange-50/50"
+                className="flex w-full items-center justify-between px-5 py-4 text-left transition hover:bg-gray-50"
               >
-                <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gray-50 text-lg">↪️</div>
-                  <div>
+                <div>
                   <p className="text-sm font-bold text-gray-800">
                     로그아웃
                   </p>
@@ -526,7 +562,6 @@ export default function MyPage() {
                   <p className="mt-1 text-xs text-gray-400">
                     현재 계정에서 로그아웃합니다.
                   </p>
-                  </div>
                 </div>
 
                 <span className="text-gray-300">
@@ -537,13 +572,12 @@ export default function MyPage() {
           </section>
 
           {/* 계정 관리 */}
-          <section className="mt-7">
-            <SectionHeader
-              title="계정 관리"
-              subtitle="탈퇴 전 삭제되는 정보를 꼭 확인해주세요."
-            />
+          <section className="mt-8">
+            <p className="mb-3 text-xs font-bold text-red-400">
+              계정 관리
+            </p>
 
-            <div className="mt-3 rounded-3xl border border-red-100 bg-red-50/40 p-5">
+            <div className="rounded-2xl bg-white p-5 shadow-sm">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-sm font-bold text-gray-800">
@@ -560,8 +594,10 @@ export default function MyPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setPassword("");
+                    setDeleteCode("");
+                    setDeleteCodeSent(false);
                     setDeleteError("");
+                    setDeleteInfo("");
                     setShowDeleteModal(true);
                   }}
                   className="shrink-0 rounded-xl bg-red-50 px-4 py-2.5 text-xs font-bold text-red-500 transition hover:bg-red-100"
@@ -572,12 +608,12 @@ export default function MyPage() {
             </div>
           </section>
         </div>
-      </AppShell>
+      </main>
 
       {/* 프로필 선택 MODAL */}
       {showProfileModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-950/45 px-5 backdrop-blur-[2px]">
-          <div className="w-full max-w-sm rounded-[28px] border border-gray-100 bg-white p-5 shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 px-5">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-extrabold text-gray-900">
@@ -688,8 +724,8 @@ export default function MyPage() {
 
       {/* 회원탈퇴 MODAL */}
       {showDeleteModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-950/45 px-5 backdrop-blur-[2px]">
-          <div className="w-full max-w-sm rounded-[28px] border border-gray-100 bg-white p-5 shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 px-5">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-extrabold text-gray-900">
@@ -728,26 +764,68 @@ export default function MyPage() {
               </div>
             </div>
 
-            <div className="mt-5">
-              <label className="text-xs font-bold text-gray-600">
-                비밀번호 확인
-              </label>
+            <div className="mt-5 rounded-2xl border border-gray-100 bg-gray-50 p-4">
+              <p className="text-xs font-bold text-gray-700">
+                이메일 본인 확인
+              </p>
 
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => {
-                  setPassword(
-                    event.target.value
-                  );
-                  setDeleteError("");
-                }}
-                placeholder="현재 비밀번호를 입력해주세요"
-                autoComplete="current-password"
-                disabled={deleting}
-                className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm text-gray-800 outline-none transition focus:border-red-400"
-              />
+              <p className="mt-1 text-xs leading-5 text-gray-400">
+                {user.email} 로 회원탈퇴 인증번호를 보내요.
+              </p>
+
+              <button
+                type="button"
+                disabled={
+                  deleting ||
+                  sendingDeleteCode
+                }
+                onClick={
+                  sendDeleteVerificationCode
+                }
+                className="mt-3 w-full rounded-xl border border-red-100 bg-white py-3 text-xs font-bold text-red-500 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {sendingDeleteCode
+                  ? "전송 중..."
+                  : deleteCodeSent
+                    ? "인증메일 다시 보내기"
+                    : "인증메일 전송하기"}
+              </button>
             </div>
+
+            {deleteCodeSent && (
+              <div className="mt-4">
+                <label className="text-xs font-bold text-gray-600">
+                  인증번호
+                </label>
+
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={deleteCode}
+                  onChange={(event) => {
+                    setDeleteCode(
+                      event.target.value
+                        .replace(/\D/g, "")
+                        .slice(0, 6)
+                    );
+                    setDeleteError("");
+                  }}
+                  placeholder="6자리 인증번호"
+                  autoComplete="one-time-code"
+                  disabled={deleting}
+                  className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 text-center text-lg font-bold tracking-[0.3em] text-gray-800 outline-none transition focus:border-red-400"
+                />
+              </div>
+            )}
+
+            {deleteInfo && (
+              <div className="mt-3 rounded-xl bg-green-50 px-4 py-3">
+                <p className="text-xs text-green-600">
+                  {deleteInfo}
+                </p>
+              </div>
+            )}
 
             {deleteError && (
               <div className="mt-3 rounded-xl bg-red-50 px-4 py-3">
@@ -773,7 +851,8 @@ export default function MyPage() {
                 type="button"
                 disabled={
                   deleting ||
-                  !password
+                  !deleteCodeSent ||
+                  !/^\d{6}$/.test(deleteCode)
                 }
                 onClick={handleDeleteAccount}
                 className="flex-1 rounded-xl bg-red-500 py-3 text-sm font-bold text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40"

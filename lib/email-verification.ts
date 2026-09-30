@@ -8,7 +8,8 @@ import {
 
 export type VerificationPurpose =
   | "signup"
-  | "password_reset";
+  | "password_reset"
+  | "account_delete";
 
 
 export const VERIFICATION_CODE_TTL_MS =
@@ -79,7 +80,8 @@ export function isVerificationPurpose(
 ): value is VerificationPurpose {
   return (
     value === "signup" ||
-    value === "password_reset"
+    value === "password_reset" ||
+    value === "account_delete"
   );
 }
 
