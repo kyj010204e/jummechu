@@ -16,6 +16,14 @@ type PreferenceRow = {
 };
 
 
+type RecommendationSessionRow = {
+  id: bigint;
+  requester_id: bigint;
+  friend_id: bigint;
+  status: string;
+};
+
+
 export async function GET(
   request: Request,
   {
@@ -143,6 +151,7 @@ export async function GET(
     const [
       myPreferences,
       friendPreferences,
+      recommendationSessions,
     ] = await Promise.all([
       prisma.$queryRaw<
         PreferenceRow[]
@@ -174,6 +183,25 @@ export async function GET(
         ORDER BY
           ufp.weight DESC,
           f.name ASC
+      `,
+
+      prisma.$queryRaw<
+        RecommendationSessionRow[]
+      >`
+        SELECT
+          id,
+          requester_id,
+          friend_id,
+          status
+        FROM friend_recommendation_sessions
+        WHERE
+          status IN ('PENDING', 'ACCEPTED', 'COMPLETED')
+          AND (
+            (requester_id = ${userId} AND friend_id = ${friendId})
+            OR
+            (requester_id = ${friendId} AND friend_id = ${userId})
+          )
+        ORDER BY id DESC
       `,
     ]);
 
@@ -231,7 +259,50 @@ export async function GET(
           );
         });
 
+    const activeSession =
+      recommendationSessions.find(
+        (session) =>
+          session.status ===
+          "ACCEPTED"
+      );
+
+    const pendingSession =
+      recommendationSessions.find(
+        (session) =>
+          session.status ===
+          "PENDING"
+      );
+
+    const hasCompletedRecommendation =
+      recommendationSessions.some(
+        (session) =>
+          session.status ===
+          "COMPLETED"
+      );
+
+    const pendingDirection =
+      !pendingSession
+        ? null
+        : pendingSession.requester_id ===
+            userId
+          ? "outgoing"
+          : "incoming";
+
+
     return NextResponse.json({
+      recommendationState: {
+        hasCompletedRecommendation,
+        activeSessionId:
+          activeSession
+            ?.id.toString() ??
+          null,
+        pendingSessionId:
+          pendingSession
+            ?.id.toString() ??
+          null,
+        pendingDirection,
+      },
+
       friend: {
         id:
           friend.id.toString(),
