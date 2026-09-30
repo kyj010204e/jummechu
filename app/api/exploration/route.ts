@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
 import { getUserId } from "@/lib/session";
+import { getUserRecommendationFeedback } from "@/lib/taste-feedback";
 
 const PROFILE_WEIGHT = 0.6;
 const BEST_ANCHOR_WEIGHT = 0.3;
@@ -10,7 +11,7 @@ const MEAN_ANCHOR_WEIGHT = 0.1;
 
 const ABSOLUTE_MIN_SCORE = 0.3;
 const RELATIVE_MIN_RATIO = 0.5;
-const MAX_RESULTS = 12;
+const MAX_RESULTS = 24;
 
 type RawTasteRow = {
   embedding_text: string;
@@ -292,6 +293,18 @@ export async function GET(request: Request) {
 
     if (limited) return limited;
 
+    const feedback =
+      await getUserRecommendationFeedback(
+        userId
+      );
+
+    const ratedFoodIds =
+      new Set(
+        feedback.map(
+          (item) => item.foodId
+        )
+      );
+
     const [tasteRows, rawFoods, rawPreferences] = await Promise.all([
       prisma.$queryRaw<RawTasteRow[]>`
         SELECT embedding::text AS embedding_text
@@ -398,7 +411,16 @@ export async function GET(request: Request) {
     const rawCandidates: Candidate[] = [];
 
     for (const food of foods) {
-      if (selectedIds.has(food.id)) continue;
+      /*
+       * 이미 기본 선호로 등록했거나 실제로 먹어보고 평가한 메뉴는
+       * 더 이상 "새로운 탐험"으로 반복 노출하지 않습니다.
+       */
+      if (
+        selectedIds.has(food.id) ||
+        ratedFoodIds.has(food.id)
+      ) {
+        continue;
+      }
 
       const profileSimilarity = dotProduct(userVector, food.vector);
       const anchorScores = preferences.map((preference) => ({
@@ -492,7 +514,7 @@ export async function GET(request: Request) {
      * 항상 똑같은 1~2개만 나오지 않도록 상위 후보 풀을 회전합니다.
      * 랜덤값 대신 variant를 써서 요청 하나는 재현 가능하게 유지합니다.
      */
-    const rotationPool = candidates.slice(0, Math.min(12, candidates.length));
+    const rotationPool = candidates.slice(0, Math.min(24, candidates.length));
     const offset = rotationPool.length > 0
       ? (variant * 2) % rotationPool.length
       : 0;

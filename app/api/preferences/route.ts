@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
 import { getUserId } from "@/lib/session";
+import { rebuildUserTasteEmbeddingWithFeedback } from "@/lib/taste-feedback";
 
 import {
   ALL_PREFERENCE_MENU_NAMES,
@@ -826,6 +827,15 @@ export async function POST(
         maxWait: 10_000,
         timeout: 30_000,
       }
+    );
+
+    /*
+     * 사용자가 탐험 메뉴에 남긴 좋아요/별로예요 기록이 있다면
+     * 방금 저장한 기본 선호 메뉴와 함께 taste embedding을 다시 만듭니다.
+     * 피드백이 없으면 결과는 기존 선호 embedding과 사실상 동일합니다.
+     */
+    await rebuildUserTasteEmbeddingWithFeedback(
+      userId
     );
 
     return NextResponse.json({
