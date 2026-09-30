@@ -3,6 +3,24 @@ import { prisma } from "@/lib/prisma";
 const LIKE_WEIGHT = 0.85;
 const DISLIKE_WEIGHT = -0.65;
 
+/*
+ * 피드백은 보조 신호입니다.
+ * 사용자가 여러 메뉴를 평가해도 초기/직접 선호보다 강해지지 않도록
+ * 좋아요/싫어요 전체 영향량을 각각 제한합니다.
+ *
+ * 예:
+ * 좋아요 1개  -> +0.85
+ * 좋아요 2개  -> +1.70
+ * 좋아요 3개+ -> 합계 최대 +2.00
+ *
+ * 싫어요 1개  -> -0.65
+ * 싫어요 2개  -> -1.30
+ * 싫어요 3개+ -> 합계 최대 -1.50
+ */
+const MAX_TOTAL_LIKE_WEIGHT = 2.0;
+const MAX_TOTAL_DISLIKE_WEIGHT = 1.5;
+const MIN_VECTOR_NORM = 1e-8;
+
 let ensureFeedbackTablePromise: Promise<void> | null = null;
 
 type FoodEmbeddingRow = {
@@ -311,19 +329,66 @@ export async function rebuildUserTasteEmbeddingWithFeedback(userId: bigint) {
     );
   }
 
-  for (const item of feedback) {
-    /*
-     * 사용자가 선호도 화면에서 직접 선택한 메뉴가 가장 강한 명시적 신호입니다.
-     * 과거 피드백과 충돌하면 직접 선택을 우선합니다.
-     */
-    if (preferenceFoodIds.has(item.food_id.toString())) {
-      continue;
-    }
+  /*
+   * 직접 선택된 선호 메뉴와 충돌하는 피드백은 애초에 학습 대상에서 제외합니다.
+   * recommendation_feedback는 (user_id, food_id) UNIQUE이므로
+   * 같은 메뉴를 좋아요 -> 싫어요로 바꿔도 두 번 누적되지 않고 최신 평가 1개만 남습니다.
+   */
+  const effectiveFeedback = feedback.filter(
+    (item) => !preferenceFoodIds.has(item.food_id.toString())
+  );
+
+  const likeCount = effectiveFeedback.filter(
+    (item) => item.rating === 1
+  ).length;
+
+  const dislikeCount = effectiveFeedback.filter(
+    (item) => item.rating === -1
+  ).length;
+
+  const rawLikeWeight = likeCount * LIKE_WEIGHT;
+  const rawDislikeWeight = dislikeCount * Math.abs(DISLIKE_WEIGHT);
+
+  const likeScale =
+    rawLikeWeight > 0
+      ? Math.min(1, MAX_TOTAL_LIKE_WEIGHT / rawLikeWeight)
+      : 1;
+
+  const dislikeScale =
+    rawDislikeWeight > 0
+      ? Math.min(1, MAX_TOTAL_DISLIKE_WEIGHT / rawDislikeWeight)
+      : 1;
+
+  for (const item of effectiveFeedback) {
+    const weight =
+      item.rating === 1
+        ? LIKE_WEIGHT * likeScale
+        : DISLIKE_WEIGHT * dislikeScale;
 
     addVector(
       parsePgVector(item.embedding_text),
-      item.rating === 1 ? LIKE_WEIGHT : DISLIKE_WEIGHT
+      weight
     );
+  }
+
+  /*
+   * 극단적으로 좋아요/싫어요가 서로 상쇄되어 벡터가 거의 0이 되는 경우에는
+   * 잘못된 0 벡터를 저장하지 않고 직접 선호만으로 한 번 더 계산합니다.
+   */
+  const accumulatorNorm = Math.sqrt(
+    accumulator.reduce((sum, value) => sum + value * value, 0)
+  );
+
+  if (!Number.isFinite(accumulatorNorm) || accumulatorNorm < MIN_VECTOR_NORM) {
+    accumulator.fill(0);
+
+    for (const preference of preferences) {
+      const weight = Number(preference.weight);
+      addVector(
+        parsePgVector(preference.embedding_text),
+        Number.isFinite(weight) && weight > 0 ? weight : 1
+      );
+    }
   }
 
   const userTasteVector = normalizeVector(accumulator);
