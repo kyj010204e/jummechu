@@ -3,6 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import MealTryModal, { type MealTryTarget } from "@/components/MealTryModal";
 import {
   getSemanticRestaurantSearchAliases,
 } from "@/lib/restaurant-search-terms";
@@ -244,13 +245,10 @@ export default function ExplorationPanel() {
   const [places, setPlaces] = useState<ExplorationPlace[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
   const [reloadCooldown, setReloadCooldown] = useState(0);
-  const [feedbackByFoodId, setFeedbackByFoodId] = useState<
-    Record<string, 1 | -1>
-  >({});
-  const [feedbackSavingId, setFeedbackSavingId] = useState<string | null>(null);
-  const [feedbackMessageByFoodId, setFeedbackMessageByFoodId] = useState<
-    Record<string, string>
-  >({});
+  const [historyRestaurantKeys, setHistoryRestaurantKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [mealTryTarget, setMealTryTarget] = useState<MealTryTarget | null>(null);
 
   const reloadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -285,6 +283,70 @@ export default function ExplorationPanel() {
     if (!loadedSettings || !isPersonalMap) return;
     localStorage.setItem(ENABLED_KEY, manualEnabled ? "true" : "false");
   }, [manualEnabled, loadedSettings, isPersonalMap]);
+
+  useEffect(() => {
+    if (!isPersonalMap) return;
+
+    function handleMealHistoryUpdated(event: Event) {
+      const detail = (event as CustomEvent<{ restaurantKey?: string }>).detail;
+      const restaurantKey = detail?.restaurantKey;
+
+      if (!restaurantKey) return;
+
+      setHistoryRestaurantKeys((current) => {
+        const next = new Set(current);
+        next.add(restaurantKey);
+        return next;
+      });
+    }
+
+    window.addEventListener(
+      "jummechu:meal-history-updated",
+      handleMealHistoryUpdated
+    );
+
+    return () => {
+      window.removeEventListener(
+        "jummechu:meal-history-updated",
+        handleMealHistoryUpdated
+      );
+    };
+  }, [isPersonalMap]);
+
+  useEffect(() => {
+    if (!isPersonalMap) return;
+
+    const controller = new AbortController();
+
+    async function loadMealHistoryRestaurants() {
+      try {
+        const response = await fetch("/api/meal-history?summary=1", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+
+        if (!response.ok || controller.signal.aborted) return;
+
+        const data = (await response.json()) as {
+          restaurants?: Array<{ restaurantKey: string }>;
+        };
+
+        setHistoryRestaurantKeys(
+          new Set(
+            (data.restaurants ?? [])
+              .map((item) => item.restaurantKey)
+              .filter(Boolean)
+          )
+        );
+      } catch {
+        /* 히스토리 조회 실패 시에도 탐험 기능 자체는 계속 동작합니다. */
+      }
+    }
+
+    void loadMealHistoryRestaurants();
+
+    return () => controller.abort();
+  }, [isPersonalMap]);
 
   useEffect(() => {
     if (!loadedSettings || !isPersonalMap || !active) {
@@ -369,6 +431,14 @@ export default function ExplorationPanel() {
             const key = `${result.place.name}|${
               result.place.roadAddress || result.place.jibunAddress
             }`;
+
+            /*
+             * 이미 먹어보기 히스토리에 있는 가게는
+             * 취향 탐험에서는 다시 노출하지 않습니다.
+             */
+            if (historyRestaurantKeys.has(key)) {
+              continue;
+            }
 
             const current = hits.get(key);
 
@@ -522,6 +592,7 @@ export default function ExplorationPanel() {
     manualEnabled,
     reloadKey,
     router,
+    historyRestaurantKeys,
   ]);
 
   useEffect(() => {
@@ -557,75 +628,38 @@ export default function ExplorationPanel() {
     }, 1000);
   }
 
-  async function submitFeedback(menu: ExplorationMenu, rating: 1 | -1) {
-    if (feedbackSavingId) return;
-
-    try {
-      setFeedbackSavingId(menu.id);
-      setFeedbackMessageByFoodId((current) => ({
-        ...current,
-        [menu.id]: "",
-      }));
-
-      const response = await fetch("/api/recommendation-feedback", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          foodId: menu.id,
-          rating,
-          source: "exploration",
-        }),
-      });
-
-      if (response.status === 401) {
-        router.replace("/login");
-        return;
-      }
-
-      const result = (await response.json()) as {
-        message?: string;
-        rating?: 1 | -1;
-      };
-
-      if (!response.ok) {
-        throw new Error(result.message ?? "평가를 반영하지 못했습니다.");
-      }
-
-      setFeedbackByFoodId((current) => ({
-        ...current,
-        [menu.id]: rating,
-      }));
-
-      setFeedbackMessageByFoodId((current) => ({
-        ...current,
-        [menu.id]:
-          result.message ??
-          (rating === 1
-            ? "다음 추천에 좋아요 취향을 반영할게요."
-            : "다음 추천에서 비슷한 메뉴 비중을 낮출게요."),
-      }));
-    } catch (feedbackError) {
-      setFeedbackMessageByFoodId((current) => ({
-        ...current,
-        [menu.id]:
-          feedbackError instanceof Error
-            ? feedbackError.message
-            : "평가를 반영하지 못했습니다.",
-      }));
-    } finally {
-      setFeedbackSavingId(null);
-    }
+  function openMealTry(item: ExplorationPlace) {
+    setMealTryTarget({
+      restaurantKey: `${item.place.name}|${
+        item.place.roadAddress || item.place.jibunAddress
+      }`,
+      restaurantName: item.place.name,
+      roadAddress: item.place.roadAddress,
+      address: item.place.jibunAddress,
+      foodId: item.menu.id,
+      menuName: item.menu.name,
+      source: "exploration",
+    });
   }
 
-  const visiblePlaces = useMemo(() => places.filter((item) => item.menu), [places]);
+  const visiblePlaces = useMemo(
+    () =>
+      places.filter((item) => {
+        const key = `${item.place.name}|${
+          item.place.roadAddress || item.place.jibunAddress
+        }`;
+
+        return item.menu && !historyRestaurantKeys.has(key);
+      }),
+    [places, historyRestaurantKeys]
+  );
 
   if (!isPersonalMap || !loadedSettings) {
     return null;
   }
 
   return (
+    <>
     <div className="fixed bottom-24 right-4 z-[80] flex max-w-[calc(100vw-2rem)] flex-col items-end gap-2">
       {open && (
         <section className="w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl border border-violet-200 bg-white shadow-2xl shadow-violet-200/40">
@@ -693,15 +727,15 @@ export default function ExplorationPanel() {
 
             {!loading && !error && visiblePlaces.length > 0 && (
               <div className="mt-3 space-y-3">
-                {visiblePlaces.map(({ menu, place, distance, matchKind, extendedSearch }) => {
-                  const feedback = feedbackByFoodId[menu.id];
-                  const feedbackMessage = feedbackMessageByFoodId[menu.id];
-                  const saving = feedbackSavingId === menu.id;
+                {visiblePlaces.map((item) => {
+                  const { menu, place, distance, matchKind, extendedSearch } = item;
 
                   return (
                     <article
                       key={menu.id}
-                      className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50/80 to-white p-4"
+                      onDoubleClick={() => openMealTry(item)}
+                      title="더블클릭하면 먹어보기에 추가돼요"
+                      className="cursor-pointer rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50/80 to-white p-4"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
@@ -765,57 +799,32 @@ export default function ExplorationPanel() {
                           </p>
                         )}
 
-                        <a
-                          href={buildNaverMapLink(place, menu.name)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="mt-3 inline-flex w-full items-center justify-center rounded-xl bg-violet-600 px-3 py-2.5 text-xs font-black text-white transition hover:bg-violet-700"
-                        >
-                          이 메뉴 한번 도전해보기 →
-                        </a>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openMealTry(item);
+                            }}
+                            className="rounded-xl bg-violet-600 px-3 py-2.5 text-xs font-black text-white transition hover:bg-violet-700"
+                          >
+                            🍽️ 먹어보기
+                          </button>
 
-                        <div className="mt-3 rounded-xl bg-white/80 p-3">
-                          <p className="text-[10px] font-bold text-gray-500">
-                            먹어본 뒤 어땠는지 알려주세요
-                          </p>
-                          <p className="mt-1 text-[10px] leading-4 text-gray-400">
-                            평가는 다음 개인 추천과 친구 공통 추천의 취향 벡터에 조금씩 반영돼요.
-                          </p>
-
-                          <div className="mt-2 grid grid-cols-2 gap-2">
-                            <button
-                              type="button"
-                              disabled={saving}
-                              onClick={() => void submitFeedback(menu, 1)}
-                              className={`rounded-xl px-3 py-2 text-xs font-black transition disabled:cursor-wait disabled:opacity-60 ${
-                                feedback === 1
-                                  ? "bg-emerald-500 text-white"
-                                  : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                              }`}
-                            >
-                              👍 좋았어요
-                            </button>
-
-                            <button
-                              type="button"
-                              disabled={saving}
-                              onClick={() => void submitFeedback(menu, -1)}
-                              className={`rounded-xl px-3 py-2 text-xs font-black transition disabled:cursor-wait disabled:opacity-60 ${
-                                feedback === -1
-                                  ? "bg-rose-500 text-white"
-                                  : "bg-rose-50 text-rose-600 hover:bg-rose-100"
-                              }`}
-                            >
-                              👎 별로였어요
-                            </button>
-                          </div>
-
-                          {feedbackMessage && (
-                            <p className="mt-2 text-[10px] leading-4 text-violet-600">
-                              {feedbackMessage}
-                            </p>
-                          )}
+                          <a
+                            href={buildNaverMapLink(place, menu.name)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(event) => event.stopPropagation()}
+                            className="inline-flex items-center justify-center rounded-xl border border-violet-100 bg-white px-3 py-2.5 text-xs font-black text-violet-600 transition hover:bg-violet-50"
+                          >
+                            네이버 지도 →
+                          </a>
                         </div>
+
+                        <p className="mt-2 text-[10px] leading-4 text-gray-400">
+                          카드를 두 번 눌러도 먹어보기 기록에 추가돼요. 먹은 뒤 평가는 히스토리에서도 언제든 남길 수 있어요.
+                        </p>
                       </div>
                     </article>
                   );
@@ -859,5 +868,11 @@ export default function ExplorationPanel() {
         {active && <span className="h-2 w-2 rounded-full bg-emerald-300" />}
       </button>
     </div>
+
+    <MealTryModal
+      target={mealTryTarget}
+      onClose={() => setMealTryTarget(null)}
+    />
+    </>
   );
 }

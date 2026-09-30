@@ -2,6 +2,7 @@
 import { useRouter } from "next/navigation";
 import Script from "next/script";
 import { parseCoordinate } from "@/lib/validation";
+import MealTryModal, { type MealTryTarget } from "@/components/MealTryModal";
 import {
   FormEvent,
   Fragment,
@@ -317,6 +318,16 @@ function calculateWeightedRecommendScore(
   );
 }
 
+function getMealHistoryPenalty(visitCount: number) {
+  const safeCount = Math.max(0, Math.floor(visitCount));
+
+  /*
+   * 이미 먹어본 가게는 일반 추천에서 완전히 숨기지 않고
+   * 방문 1회당 4점씩, 최대 16점까지만 천천히 낮춥니다.
+   */
+  return Math.min(16, safeCount * 4);
+}
+
 /* =========================================================
    NAVER MAP 타입
 ========================================================= */
@@ -596,6 +607,20 @@ export default function MapPage() {
     restaurantRefreshKey,
     setRestaurantRefreshKey,
   ] = useState(0);
+
+  /*
+   * 먹어보기 히스토리 기반 재방문 감점
+   * key = Restaurant.id (name|address)
+   */
+  const [
+    mealHistoryVisits,
+    setMealHistoryVisits,
+  ] = useState<Record<string, number>>({});
+
+  const [
+    mealTryTarget,
+    setMealTryTarget,
+  ] = useState<MealTryTarget | null>(null);
 
   const [
     businessHoursRestaurant,
@@ -1289,6 +1314,82 @@ export default function MapPage() {
   ]);
 
   /* =======================================================
+     먹어보기 히스토리 요약
+  ======================================================= */
+
+  useEffect(() => {
+    function handleMealHistoryUpdated(event: Event) {
+      const detail = (event as CustomEvent<{ restaurantKey?: string }>).detail;
+      const restaurantKey = detail?.restaurantKey;
+
+      if (!restaurantKey) return;
+
+      setMealHistoryVisits((current) => ({
+        ...current,
+        [restaurantKey]: (current[restaurantKey] ?? 0) + 1,
+      }));
+    }
+
+    window.addEventListener(
+      "jummechu:meal-history-updated",
+      handleMealHistoryUpdated
+    );
+
+    return () => {
+      window.removeEventListener(
+        "jummechu:meal-history-updated",
+        handleMealHistoryUpdated
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadMealHistorySummary() {
+      try {
+        const response = await fetch(
+          "/api/meal-history?summary=1",
+          {
+            cache: "no-store",
+            signal: controller.signal,
+          }
+        );
+
+        if (response.status === 401) {
+          return;
+        }
+
+        const data = (await response.json()) as {
+          restaurants?: Array<{
+            restaurantKey: string;
+            visitCount: number;
+          }>;
+        };
+
+        if (!response.ok || controller.signal.aborted) {
+          return;
+        }
+
+        const next: Record<string, number> = {};
+
+        for (const item of data.restaurants ?? []) {
+          if (!item.restaurantKey) continue;
+          next[item.restaurantKey] = Math.max(0, Number(item.visitCount) || 0);
+        }
+
+        setMealHistoryVisits(next);
+      } catch {
+        /* 히스토리 조회 실패가 지도 추천 자체를 막으면 안 됩니다. */
+      }
+    }
+
+    void loadMealHistorySummary();
+
+    return () => controller.abort();
+  }, []);
+
+  /* =======================================================
      5. 개인설정 필터 + 사용자 가중치 정렬
   ======================================================= */
 
@@ -1385,17 +1486,25 @@ export default function MapPage() {
               : -1;
           }
 
-          return (
+          const bScore =
             calculateWeightedRecommendScore(
               b,
               preferenceWeight
-            )
-            -
+            ) -
+            getMealHistoryPenalty(
+              mealHistoryVisits[b.id] ?? 0
+            );
+
+          const aScore =
             calculateWeightedRecommendScore(
               a,
               preferenceWeight
-            )
-          );
+            ) -
+            getMealHistoryPenalty(
+              mealHistoryVisits[a.id] ?? 0
+            );
+
+          return bScore - aScore;
         }
       );
 
@@ -1409,6 +1518,7 @@ export default function MapPage() {
       parkingRequired,
       includeUnknownParking,
       includeBars,
+      mealHistoryVisits,
     ]);
 
   const mealRestaurantCount =
@@ -1497,12 +1607,19 @@ export default function MapPage() {
       (
         restaurant: Restaurant
       ) =>
-        calculateWeightedRecommendScore(
-          restaurant,
-          preferenceWeight
+        Math.max(
+          0,
+          calculateWeightedRecommendScore(
+            restaurant,
+            preferenceWeight
+          ) -
+            getMealHistoryPenalty(
+              mealHistoryVisits[restaurant.id] ?? 0
+            )
         ),
       [
         preferenceWeight,
+        mealHistoryVisits,
       ]
     );
 
@@ -1518,6 +1635,23 @@ export default function MapPage() {
     setSelectedRestaurantId(
       restaurant.id
     );
+  }
+
+  function openMealTry(
+    restaurant: Restaurant
+  ) {
+    setMealTryTarget({
+      restaurantKey: restaurant.id,
+      restaurantName: restaurant.name,
+      roadAddress: restaurant.roadAddress,
+      address: restaurant.address,
+      menuName:
+        restaurant.recommendedMenuName ??
+        restaurant.matchedPreferences[0] ??
+        null,
+      foodId: null,
+      source: "recommendation",
+    });
   }
 
   /* =======================================================
@@ -4185,16 +4319,26 @@ export default function MapPage() {
                   : "근처 추천 맛집"}
               </h2>
 
-              {!restaurantLoading &&
-                sortedRestaurants.length > 0 && (
-                  <span className="text-xs text-gray-400">
-                    {mealRestaurantCount}곳
-                    {barRestaurantCount >
-                      0
-                      ? ` · 술집 ${barRestaurantCount}곳`
-                      : ""}
-                  </span>
-                )}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => router.push("/meal-history")}
+                  className="rounded-full border border-orange-100 bg-white px-3 py-1.5 text-[11px] font-bold text-orange-500 transition hover:bg-orange-50"
+                >
+                  🕘 먹어본 기록
+                </button>
+
+                {!restaurantLoading &&
+                  sortedRestaurants.length > 0 && (
+                    <span className="text-xs text-gray-400">
+                      {mealRestaurantCount}곳
+                      {barRestaurantCount >
+                        0
+                        ? ` · 술집 ${barRestaurantCount}곳`
+                        : ""}
+                    </span>
+                  )}
+              </div>
 
             </div>
 
@@ -4315,6 +4459,12 @@ export default function MapPage() {
                           restaurant
                         )
                       }
+                      onDoubleClick={() =>
+                        openMealTry(
+                          restaurant
+                        )
+                      }
+                      title="더블클릭하면 먹어보기에 추가돼요"
                       className={`cursor-pointer rounded-2xl border bg-white p-4 transition ${
                         selected
                           ? "border-orange-400 shadow-lg ring-2 ring-orange-100"
@@ -4432,6 +4582,12 @@ export default function MapPage() {
                                 restaurant.distance
                               )}
                             </span>
+
+                            {(mealHistoryVisits[restaurant.id] ?? 0) > 0 && (
+                              <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-600">
+                                🍚 먹어본 곳 {mealHistoryVisits[restaurant.id]}회 · 추천 -{getMealHistoryPenalty(mealHistoryVisits[restaurant.id])}
+                              </span>
+                            )}
 
                             {restaurant.parkingAvailable ===
                               true && (
@@ -4626,6 +4782,17 @@ export default function MapPage() {
                           {/* 링크 */}
 
                           <div className="mt-3 flex flex-wrap items-center gap-3">
+
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openMealTry(restaurant);
+                              }}
+                              className="rounded-lg bg-orange-500 px-3 py-2 text-xs font-black text-white transition hover:bg-orange-600"
+                            >
+                              🍽️ 먹어보기
+                            </button>
 
                             <a
                               href={getNaverMapLink(
@@ -5589,6 +5756,10 @@ export default function MapPage() {
 
           </div>
         )}
+      <MealTryModal
+        target={mealTryTarget}
+        onClose={() => setMealTryTarget(null)}
+      />
     </>
   );
 }
