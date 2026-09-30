@@ -77,6 +77,14 @@ type LocationSearchResponse = {
 
 type RecommendedPlace = LocationSearchResult & {
   matchedMenus: string[];
+  recommendedMenuName?: string | null;
+  menuMatchConfidence?:
+    | "exact"
+    | "alias"
+    | "broad"
+    | null;
+  menuMatchConfidenceLabel?: string | null;
+  menuMatchSearchTerm?: string | null;
   menuScore: number;
   distanceScore: number;
   finalScore: number;
@@ -87,10 +95,6 @@ type NaverLatLng = {
   lat(): number;
   lng(): number;
 };
-
-
-type NaverPoint = object;
-type NaverSize = object;
 
 
 interface NaverMapInstance {
@@ -107,53 +111,8 @@ type NaverLatLngBounds = {
 
 
 interface NaverMarkerInstance {
-  setPosition(position: NaverLatLng): void;
   setMap(map: NaverMapInstance | null): void;
 }
-
-
-interface NaverMapsApi {
-  LatLng: new (
-    latitude: number,
-    longitude: number
-  ) => NaverLatLng;
-
-  LatLngBounds: new (
-    sw: NaverLatLng,
-    ne: NaverLatLng
-  ) => NaverLatLngBounds;
-
-  Point: new (
-    x: number,
-    y: number
-  ) => NaverPoint;
-
-  Size: new (
-    width: number,
-    height: number
-  ) => NaverSize;
-
-  Map: new (
-    element: HTMLElement,
-    options: {
-      center: NaverLatLng;
-      zoom: number;
-    }
-  ) => NaverMapInstance;
-
-  Marker: new (options: {
-    position: NaverLatLng;
-    map: NaverMapInstance;
-    zIndex?: number;
-    icon?: {
-      content: string;
-      size?: NaverSize;
-      anchor?: NaverPoint;
-    };
-  }) => NaverMarkerInstance;
-}
-
-
 
 
 function escapeHtml(
@@ -164,6 +123,42 @@ function escapeHtml(
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function getMenuMatchConfidenceMeta(
+  place: RecommendedPlace
+) {
+  if (place.menuMatchConfidence === "exact") {
+    return {
+      label:
+        place.menuMatchConfidenceLabel ??
+        "메뉴명 직접 검색",
+      className:
+        "bg-emerald-50 text-emerald-700",
+    };
+  }
+
+  if (place.menuMatchConfidence === "alias") {
+    return {
+      label:
+        place.menuMatchConfidenceLabel ??
+        "유사 메뉴명 기준",
+      className:
+        "bg-blue-50 text-blue-700",
+    };
+  }
+
+  if (place.menuMatchConfidence === "broad") {
+    return {
+      label:
+        place.menuMatchConfidenceLabel ??
+        "넓은 계열 기준",
+      className:
+        "bg-amber-50 text-amber-700",
+    };
+  }
+
+  return null;
 }
 
 
@@ -228,9 +223,6 @@ function getStoredLocation(): LocationData | null {
 }
 
 
-const PLACE_REFRESH_COOLDOWN_SECONDS = 10;
-
-
 export default function FriendMapPage() {
   const router =
     useRouter();
@@ -268,12 +260,6 @@ export default function FriendMapPage() {
 
   const [placeLoading, setPlaceLoading] =
     useState(false);
-
-  const [placeRefreshKey, setPlaceRefreshKey] =
-    useState(0);
-
-  const [placeRefreshCooldown, setPlaceRefreshCooldown] =
-    useState(0);
 
   const [error, setError] =
     useState("");
@@ -544,40 +530,6 @@ export default function FriendMapPage() {
 
 
   useEffect(() => {
-    if (placeRefreshCooldown <= 0) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setPlaceRefreshCooldown(
-        (current) => Math.max(0, current - 1)
-      );
-    }, 1000);
-
-    return () => window.clearTimeout(timer);
-  }, [placeRefreshCooldown]);
-
-
-  function refreshPlaces() {
-    if (
-      placeLoading ||
-      placeRefreshCooldown > 0 ||
-      !location
-    ) {
-      return;
-    }
-
-    setPlaceRefreshCooldown(
-      PLACE_REFRESH_COOLDOWN_SECONDS
-    );
-    setError("");
-    setPlaceRefreshKey(
-      (current) => current + 1
-    );
-  }
-
-
-  useEffect(() => {
     if (
       !session ||
       !location ||
@@ -586,10 +538,6 @@ export default function FriendMapPage() {
       return;
     }
 
-    /*
-     * React state는 비동기 함수 안에서 다시 null이 될 수 있다고
-     * TypeScript가 판단하므로, guard를 통과한 현재 위치를 고정합니다.
-     */
     const activeLocation =
       location;
 
@@ -699,14 +647,7 @@ export default function FriendMapPage() {
 
     return () =>
       controller.abort();
-  }, [
-    session,
-    sessionId,
-    location?.latitude,
-    location?.longitude,
-    placeRefreshKey,
-    router,
-  ]);
+  }, [session, sessionId, location, router]);
 
 
   useEffect(() => {
@@ -976,25 +917,19 @@ export default function FriendMapPage() {
               </h1>
             </div>
 
-            {session?.session.status === "ACCEPTED" ? (
-              <button
-                type="button"
-                onClick={completeSession}
-                disabled={completing}
-                className="flex h-10 min-w-10 items-center justify-center rounded-xl bg-orange-500 px-3 text-xs font-extrabold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label="같이 먹기 완료"
-                title="같이 먹기 완료"
-              >
-                {completing
-                  ? "처리중"
-                  : "완료"}
-              </button>
-            ) : (
-              <div
-                className="h-10 w-10"
-                aria-hidden="true"
-              />
-            )}
+            <button
+              type="button"
+              onClick={() =>
+                router.push(
+                  "/map"
+                )
+              }
+              className="flex h-10 w-10 items-center justify-center rounded-full text-lg text-gray-500 transition hover:bg-gray-100"
+              aria-label="개인 지도"
+              title="개인 지도"
+            >
+              🗺️
+            </button>
           </header>
 
 
@@ -1221,28 +1156,9 @@ export default function FriendMapPage() {
                         </p>
                       </div>
 
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="rounded-full bg-orange-50 px-3 py-1.5 text-xs font-extrabold text-orange-500">
-                          {places.length}곳
-                        </span>
-
-                        <button
-                          type="button"
-                          onClick={refreshPlaces}
-                          disabled={
-                            placeLoading ||
-                            placeRefreshCooldown > 0
-                          }
-                          className="rounded-xl border border-orange-100 bg-white px-3 py-1.5 text-xs font-extrabold text-orange-500 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          title="현재 선택 장소 주변 음식점을 다시 검색합니다."
-                        >
-                          {placeLoading
-                            ? "검색 중"
-                            : placeRefreshCooldown > 0
-                              ? `${placeRefreshCooldown}초`
-                              : "↻"}
-                        </button>
-                      </div>
+                      <span className="rounded-full bg-orange-50 px-3 py-1.5 text-xs font-extrabold text-orange-500">
+                        {places.length}곳
+                      </span>
                     </div>
                   </section>
 
@@ -1333,6 +1249,22 @@ export default function FriendMapPage() {
                               </div>
 
                               <div className="mt-3 flex flex-wrap gap-1.5">
+                                {getMenuMatchConfidenceMeta(
+                                  place
+                                ) && (
+                                  <span
+                                    className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${
+                                      getMenuMatchConfidenceMeta(
+                                        place
+                                      )!.className
+                                    }`}
+                                  >
+                                    {getMenuMatchConfidenceMeta(
+                                      place
+                                    )!.label}
+                                  </span>
+                                )}
+
                                 {place.matchedMenus.map(
                                   (menu) => (
                                     <span
@@ -1344,6 +1276,13 @@ export default function FriendMapPage() {
                                   )
                                 )}
                               </div>
+
+                              {place.menuMatchConfidence ===
+                                "broad" && (
+                                <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-[10px] leading-4 text-amber-700">
+                                  넓은 메뉴 계열로 찾은 후보예요. 실제 공통 추천 메뉴 판매 여부는 네이버 메뉴판에서 확인해주세요.
+                                </p>
+                              )}
 
                               <p className="mt-3 text-xs leading-5 text-gray-500">
                                 {place.roadAddress ||
@@ -1365,7 +1304,23 @@ export default function FriendMapPage() {
                     )}
                   </section>
 
-
+                  {session.session.status === "ACCEPTED" && (
+                    <section className="border-t border-gray-100 px-4 py-5">
+                      <button
+                        type="button"
+                        onClick={completeSession}
+                        disabled={completing}
+                        className="w-full rounded-2xl bg-gray-900 py-4 text-sm font-extrabold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {completing
+                          ? "완료 처리 중..."
+                          : "같이 먹기 완료"}
+                      </button>
+                      <p className="mt-2 text-center text-[11px] text-gray-400">
+                        완료하면 이 추천은 히스토리로 이동해요.
+                      </p>
+                    </section>
+                  )}
                 </>
               )}
             </>

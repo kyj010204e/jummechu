@@ -7,7 +7,11 @@ import {
 import { rateLimit } from "@/lib/rate-limit";
 
 import {
+  getRestaurantSearchConfidence,
+  getRestaurantSearchConfidenceLabel,
+  getRestaurantSearchConfidenceRank,
   getSemanticRestaurantSearchAliases,
+  type RestaurantSearchConfidence,
 } from "@/lib/restaurant-search-terms";
 
 import {
@@ -256,6 +260,21 @@ type RestaurantCore = {
     number | null;
 
   /*
+   * 이 식당을 어떤 수준의 검색어로 발견했는지 표시합니다.
+   * exact: 추천 메뉴명 자체로 검색
+   * alias: 수육/돈까스처럼 정규화된 유사 메뉴명으로 검색
+   * broad: family/category 같은 넓은 계열 검색
+   */
+  menuMatchConfidence:
+    RestaurantSearchConfidence | null;
+
+  menuMatchConfidenceLabel:
+    string | null;
+
+  menuMatchSearchTerm:
+    string | null;
+
+  /*
    * AI 메뉴 취향 점수
    */
   preferenceScore: number;
@@ -490,6 +509,69 @@ type SearchTerm = {
 
   kind: SearchTermKind;
 };
+
+type SearchMatchEvidence = {
+  score: number;
+  confidence: RestaurantSearchConfidence;
+  query: string;
+  kind: SearchTermKind;
+};
+
+function mergeSearchMatchEvidence(
+  current: SearchMatchEvidence | undefined,
+  searchTerm: SearchTerm,
+  score: number
+): SearchMatchEvidence {
+  const confidence =
+    getRestaurantSearchConfidence(
+      searchTerm.kind
+    );
+
+  if (!current) {
+    return {
+      score,
+      confidence,
+      query: searchTerm.name,
+      kind: searchTerm.kind,
+    };
+  }
+
+  const nextRank =
+    getRestaurantSearchConfidenceRank(
+      confidence
+    );
+
+  const currentRank =
+    getRestaurantSearchConfidenceRank(
+      current.confidence
+    );
+
+  const replaceDescriptor =
+    nextRank > currentRank ||
+    (
+      nextRank === currentRank &&
+      score > current.score
+    );
+
+  return {
+    score: Math.max(
+      current.score,
+      score
+    ),
+    confidence:
+      replaceDescriptor
+        ? confidence
+        : current.confidence,
+    query:
+      replaceDescriptor
+        ? searchTerm.name
+        : current.query,
+    kind:
+      replaceDescriptor
+        ? searchTerm.kind
+        : current.kind,
+  };
+}
 
 
 /* =========================================================
@@ -4981,7 +5063,7 @@ export async function GET(
           matchedTerms:
             Map<
               string,
-              number
+              SearchMatchEvidence
             >;
         }
       >();
@@ -5156,12 +5238,12 @@ export async function GET(
 
         if (existing) {
 
-          const oldScore =
+          const currentEvidence =
             existing
               .matchedTerms
               .get(
                 searchTerm.sourceMenu
-              ) ?? 0;
+              );
 
 
           existing
@@ -5169,8 +5251,9 @@ export async function GET(
             .set(
               searchTerm.sourceMenu,
 
-              Math.max(
-                oldScore,
+              mergeSearchMatchEvidence(
+                currentEvidence,
+                searchTerm,
                 adjustedSearchScore
               )
             );
@@ -5187,7 +5270,11 @@ export async function GET(
                 new Map([
                   [
                     searchTerm.sourceMenu,
-                    adjustedSearchScore,
+                    mergeSearchMatchEvidence(
+                      undefined,
+                      searchTerm,
+                      adjustedSearchScore
+                    ),
                   ],
                 ]),
             }
@@ -5332,9 +5419,24 @@ export async function GET(
             (
               a,
               b
-            ) =>
-              b[1] -
-              a[1]
+            ) => {
+              const scoreDiff =
+                b[1].score -
+                a[1].score;
+
+              if (scoreDiff !== 0) {
+                return scoreDiff;
+              }
+
+              return (
+                getRestaurantSearchConfidenceRank(
+                  b[1].confidence
+                ) -
+                getRestaurantSearchConfidenceRank(
+                  a[1].confidence
+                )
+              );
+            }
           );
 
 
@@ -5346,7 +5448,31 @@ export async function GET(
 
       const recommendedMenuScore =
         rankedMatchedEntries[0]
+          ?.[1].score ??
+        null;
+
+
+      const recommendedMenuEvidence =
+        rankedMatchedEntries[0]
           ?.[1] ??
+        null;
+
+
+      const menuMatchConfidence =
+        recommendedMenuEvidence
+          ?.confidence ??
+        null;
+
+
+      const menuMatchConfidenceLabel =
+        getRestaurantSearchConfidenceLabel(
+          menuMatchConfidence
+        );
+
+
+      const menuMatchSearchTerm =
+        recommendedMenuEvidence
+          ?.query ??
         null;
 
 
@@ -5363,10 +5489,10 @@ export async function GET(
             (
               [
                 ,
-                score,
+                evidence,
               ]
             ) =>
-              score
+              evidence.score
           );
 
 
@@ -5544,6 +5670,12 @@ export async function GET(
 
         recommendedMenuScore,
 
+        menuMatchConfidence,
+
+        menuMatchConfidenceLabel,
+
+        menuMatchSearchTerm,
+
         preferenceScore,
 
         distanceScore,
@@ -5624,9 +5756,23 @@ export async function GET(
         }
 
 
-        return (
+        const scoreDiff =
           b.recommendScore -
-          a.recommendScore
+          a.recommendScore;
+
+
+        if (scoreDiff !== 0) {
+          return scoreDiff;
+        }
+
+
+        return (
+          getRestaurantSearchConfidenceRank(
+            b.menuMatchConfidence
+          ) -
+          getRestaurantSearchConfidenceRank(
+            a.menuMatchConfidence
+          )
         );
       }
     );

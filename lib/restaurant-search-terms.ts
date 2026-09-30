@@ -19,6 +19,52 @@ export type RestaurantSearchTerm = {
   kind: RestaurantSearchTermKind;
 };
 
+export type RestaurantSearchConfidence =
+  | "exact"
+  | "alias"
+  | "broad";
+
+export function getRestaurantSearchConfidence(
+  kind: RestaurantSearchTermKind | "favorite"
+): RestaurantSearchConfidence {
+  if (kind === "favorite" || kind === "menu") {
+    return "exact";
+  }
+
+  if (kind === "alias") {
+    return "alias";
+  }
+
+  return "broad";
+}
+
+export function getRestaurantSearchConfidenceRank(
+  confidence: RestaurantSearchConfidence | null | undefined
+) {
+  if (confidence === "exact") return 3;
+  if (confidence === "alias") return 2;
+  if (confidence === "broad") return 1;
+  return 0;
+}
+
+export function getRestaurantSearchConfidenceLabel(
+  confidence: RestaurantSearchConfidence | null | undefined
+) {
+  if (confidence === "exact") {
+    return "메뉴명 직접 검색";
+  }
+
+  if (confidence === "alias") {
+    return "유사 메뉴명 기준";
+  }
+
+  if (confidence === "broad") {
+    return "넓은 계열 기준";
+  }
+
+  return null;
+}
+
 type BuildOptions = {
   exactLimit?: number;
   aliasLimit?: number;

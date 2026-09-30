@@ -14,6 +14,10 @@ import {
 
 import {
   buildExpandedRestaurantSearchTerms,
+  getRestaurantSearchConfidence,
+  getRestaurantSearchConfidenceLabel,
+  getRestaurantSearchConfidenceRank,
+  type RestaurantSearchConfidence,
   type RestaurantSearchTerm,
 } from "@/lib/restaurant-search-terms";
 
@@ -59,6 +63,53 @@ type NaverLocalResponse = {
 
 type SearchTerm = RestaurantSearchTerm;
 
+type SearchMatchEvidence = {
+  score: number;
+  confidence: RestaurantSearchConfidence;
+  query: string;
+  kind: SearchTerm["kind"];
+};
+
+function mergeSearchMatchEvidence(
+  current: SearchMatchEvidence | undefined,
+  searchTerm: SearchTerm,
+  score: number
+): SearchMatchEvidence {
+  const confidence =
+    getRestaurantSearchConfidence(searchTerm.kind);
+
+  if (!current) {
+    return {
+      score,
+      confidence,
+      query: searchTerm.name,
+      kind: searchTerm.kind,
+    };
+  }
+
+  const nextRank =
+    getRestaurantSearchConfidenceRank(confidence);
+  const currentRank =
+    getRestaurantSearchConfidenceRank(current.confidence);
+
+  const replaceDescriptor =
+    nextRank > currentRank ||
+    (nextRank === currentRank && score > current.score);
+
+  return {
+    score: Math.max(current.score, score),
+    confidence: replaceDescriptor
+      ? confidence
+      : current.confidence,
+    query: replaceDescriptor
+      ? searchTerm.name
+      : current.query,
+    kind: replaceDescriptor
+      ? searchTerm.kind
+      : current.kind,
+  };
+}
+
 type Restaurant = {
   id: string;
   name: string;
@@ -70,6 +121,10 @@ type Restaurant = {
   longitude: number;
   distance: number;
   matchedPreferences: string[];
+  recommendedMenuName: string | null;
+  menuMatchConfidence: RestaurantSearchConfidence | null;
+  menuMatchConfidenceLabel: string | null;
+  menuMatchSearchTerm: string | null;
   preferenceScore: number;
   distanceScore: number;
   recommendScore: number;
@@ -332,7 +387,7 @@ export async function GET(request: NextRequest) {
       string,
       {
         item: NaverLocalItem;
-        matchedTerms: Map<string, number>;
+        matchedTerms: Map<string, SearchMatchEvidence>;
       }
     >();
 
@@ -388,18 +443,29 @@ export async function GET(request: NextRequest) {
         const existing = collected.get(key);
 
         if (existing) {
-          const oldScore =
-            existing.matchedTerms.get(searchTerm.sourceMenu) ?? 0;
+          const currentEvidence =
+            existing.matchedTerms.get(searchTerm.sourceMenu);
 
           existing.matchedTerms.set(
             searchTerm.sourceMenu,
-            Math.max(oldScore, searchTerm.score)
+            mergeSearchMatchEvidence(
+              currentEvidence,
+              searchTerm,
+              searchTerm.score
+            )
           );
         } else {
           collected.set(key, {
             item,
             matchedTerms: new Map([
-              [searchTerm.sourceMenu, searchTerm.score],
+              [
+                searchTerm.sourceMenu,
+                mergeSearchMatchEvidence(
+                  undefined,
+                  searchTerm,
+                  searchTerm.score
+                ),
+              ],
             ]),
           });
         }
@@ -462,7 +528,36 @@ export async function GET(request: NextRequest) {
         value.matchedTerms.entries()
       );
 
-      const scores = matchedEntries.map(([, score]) => score);
+      const rankedMatchedEntries =
+        [...matchedEntries].sort((a, b) => {
+          const scoreDiff = b[1].score - a[1].score;
+
+          if (scoreDiff !== 0) {
+            return scoreDiff;
+          }
+
+          return (
+            getRestaurantSearchConfidenceRank(b[1].confidence) -
+            getRestaurantSearchConfidenceRank(a[1].confidence)
+          );
+        });
+
+      const recommendedMenuName =
+        rankedMatchedEntries[0]?.[0] ?? null;
+
+      const recommendedEvidence =
+        rankedMatchedEntries[0]?.[1] ?? null;
+
+      const menuMatchConfidence =
+        recommendedEvidence?.confidence ?? null;
+
+      const menuMatchConfidenceLabel =
+        getRestaurantSearchConfidenceLabel(menuMatchConfidence);
+
+      const menuMatchSearchTerm =
+        recommendedEvidence?.query ?? null;
+
+      const scores = matchedEntries.map(([, evidence]) => evidence.score);
 
       const maxScore =
         scores.length > 0
@@ -505,7 +600,11 @@ export async function GET(request: NextRequest) {
         latitude: restaurantLatitude,
         longitude: restaurantLongitude,
         distance,
-        matchedPreferences: matchedEntries.map(([name]) => name),
+        matchedPreferences: rankedMatchedEntries.map(([name]) => name),
+        recommendedMenuName,
+        menuMatchConfidence,
+        menuMatchConfidenceLabel,
+        menuMatchSearchTerm,
         preferenceScore,
         distanceScore,
         recommendScore,
@@ -514,7 +613,18 @@ export async function GET(request: NextRequest) {
 
     const finalRestaurants = restaurants
       .filter((restaurant) => restaurant.distance <= radiusMeters)
-      .sort((a, b) => b.recommendScore - a.recommendScore);
+      .sort((a, b) => {
+        const scoreDiff = b.recommendScore - a.recommendScore;
+
+        if (scoreDiff !== 0) {
+          return scoreDiff;
+        }
+
+        return (
+          getRestaurantSearchConfidenceRank(b.menuMatchConfidence) -
+          getRestaurantSearchConfidenceRank(a.menuMatchConfidence)
+        );
+      });
 
     return NextResponse.json({
       region: {

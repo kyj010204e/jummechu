@@ -76,16 +76,12 @@ type Restaurant = {
   id: string;
   name: string;
   category: string;
-
-  /*
-   * 서버의 음식점/술집 분류.
-   * 일부 오래된 응답에도 안전하게 동작하도록 optional로 둡니다.
-   */
-  venueType?: "restaurant" | "bar";
-  venueTypeLabel?: "음식점" | "술집";
-
   address: string;
   roadAddress: string;
+
+  venueType:
+    | "restaurant"
+    | "bar";
 
   latitude: number;
   longitude: number;
@@ -99,6 +95,18 @@ type Restaurant = {
 
   recommendedMenuScore:
     number | null;
+
+  menuMatchConfidence?:
+    | "exact"
+    | "alias"
+    | "broad"
+    | null;
+
+  menuMatchConfidenceLabel?:
+    string | null;
+
+  menuMatchSearchTerm?:
+    string | null;
 
   preferenceScore: number;
   distanceScore: number;
@@ -200,6 +208,10 @@ function normalizeRestaurant(
   return {
     ...restaurant,
 
+    venueType:
+      restaurant.venueType ??
+      "restaurant",
+
     matchedPreferences:
       Array.isArray(restaurant.matchedPreferences)
         ? restaurant.matchedPreferences
@@ -210,6 +222,15 @@ function normalizeRestaurant(
 
     recommendedMenuScore:
       restaurant.recommendedMenuScore ?? null,
+
+    menuMatchConfidence:
+      restaurant.menuMatchConfidence ?? null,
+
+    menuMatchConfidenceLabel:
+      restaurant.menuMatchConfidenceLabel ?? null,
+
+    menuMatchSearchTerm:
+      restaurant.menuMatchSearchTerm ?? null,
 
     priceMenuName:
       restaurant.priceMenuName ?? null,
@@ -262,8 +283,6 @@ const MAX_RESTAURANT_SEARCH_RADIUS_KM = 5;
 
 const RECOMMENDATION_SETTINGS_KEY =
   "jummechu_recommendation_settings_v1";
-
-const RESTAURANT_REFRESH_COOLDOWN_SECONDS = 10;
 
 
 function calculateWeightedRecommendScore(
@@ -576,11 +595,6 @@ export default function MapPage() {
   const [
     restaurantRefreshKey,
     setRestaurantRefreshKey,
-  ] = useState(0);
-
-  const [
-    restaurantRefreshCooldown,
-    setRestaurantRefreshCooldown,
   ] = useState(0);
 
   const [
@@ -1154,46 +1168,6 @@ export default function MapPage() {
   ]);
 
   /* =======================================================
-     음식점 수동 새로고침 쿨다운
-
-     - 위치가 바뀌면 아래 음식점 API effect가 자동 재실행됩니다.
-     - 같은 위치에서 수동 새로고침은 10초에 한 번만 허용합니다.
-     - 서버에도 별도 rate limit이 있으므로 이 값은 UI 레벨의 1차 보호입니다.
-  ======================================================= */
-
-  useEffect(() => {
-    if (restaurantRefreshCooldown <= 0) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setRestaurantRefreshCooldown(
-        (current) => Math.max(0, current - 1)
-      );
-    }, 1000);
-
-    return () => window.clearTimeout(timer);
-  }, [restaurantRefreshCooldown]);
-
-  function refreshRestaurants() {
-    if (
-      restaurantLoading ||
-      restaurantRefreshCooldown > 0
-    ) {
-      return;
-    }
-
-    setRestaurantRefreshCooldown(
-      RESTAURANT_REFRESH_COOLDOWN_SECONDS
-    );
-    setRestaurantError("");
-    setSelectedRestaurantId(null);
-    setRestaurantRefreshKey(
-      (current) => current + 1
-    );
-  }
-
-  /* =======================================================
      4. 음식점 API
   ======================================================= */
 
@@ -1206,8 +1180,6 @@ export default function MapPage() {
         setRestaurantLoading(true);
 
         setRestaurantError("");
-        setRestaurants([]);
-        setSelectedRestaurantId(null);
 
         /*
          * query string
@@ -1312,8 +1284,7 @@ export default function MapPage() {
     loadRestaurants();
     return () => controller.abort();
   }, [
-    location?.latitude,
-    location?.longitude,
+    location,
     restaurantRefreshKey,
   ]);
 
@@ -2983,6 +2954,51 @@ export default function MapPage() {
   }
 
 
+  function getMenuMatchConfidenceMeta(
+    restaurant: Restaurant
+  ) {
+    switch (
+      restaurant.menuMatchConfidence
+    ) {
+      case "exact":
+        return {
+          label:
+            restaurant.menuMatchConfidenceLabel ??
+            "메뉴명 직접 검색",
+          className:
+            "border-emerald-100 bg-emerald-50 text-emerald-700",
+          detail:
+            "추천 메뉴명으로 직접 검색해 찾은 곳이에요.",
+        };
+
+      case "alias":
+        return {
+          label:
+            restaurant.menuMatchConfidenceLabel ??
+            "유사 메뉴명 기준",
+          className:
+            "border-blue-100 bg-blue-50 text-blue-700",
+          detail:
+            "더 일반적인 메뉴명으로 넓혀 찾은 곳이에요.",
+        };
+
+      case "broad":
+        return {
+          label:
+            restaurant.menuMatchConfidenceLabel ??
+            "넓은 계열 기준",
+          className:
+            "border-amber-100 bg-amber-50 text-amber-700",
+          detail:
+            "메뉴 계열 기준 후보라 실제 판매 여부는 메뉴판 확인을 권장해요.",
+        };
+
+      default:
+        return null;
+    }
+  }
+
+
   function getPriceSummary(
     restaurant: Restaurant
   ) {
@@ -3911,6 +3927,30 @@ export default function MapPage() {
 
                   </div>
 
+                  {getMenuMatchConfidenceMeta(
+                    selectedRestaurant
+                  ) && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span
+                        className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${
+                          getMenuMatchConfidenceMeta(
+                            selectedRestaurant
+                          )!.className
+                        }`}
+                      >
+                        {getMenuMatchConfidenceMeta(
+                          selectedRestaurant
+                        )!.label}
+                      </span>
+
+                      <span className="text-[10px] text-gray-400">
+                        {getMenuMatchConfidenceMeta(
+                          selectedRestaurant
+                        )!.detail}
+                      </span>
+                    </div>
+                  )}
+
 
                   <div className="mt-2 rounded-xl bg-emerald-50/70 px-3 py-2">
 
@@ -4137,43 +4177,24 @@ export default function MapPage() {
                 </div>
               )}
 
-            <div className="mt-4 flex items-end justify-between gap-3">
+            <div className="mt-4 flex items-end justify-between">
 
-              <div>
-                <h2 className="text-xl font-bold text-gray-900">
-                  {mode === "settings"
-                    ? "설정 적용 결과"
-                    : "근처 추천 맛집"}
-                </h2>
+              <h2 className="text-xl font-bold text-gray-900">
+                {mode === "settings"
+                  ? "설정 적용 결과"
+                  : "근처 추천 맛집"}
+              </h2>
 
-                {!restaurantLoading &&
-                  sortedRestaurants.length > 0 && (
-                    <p className="mt-1 text-xs text-gray-400">
-                      {mealRestaurantCount}곳
-                      {barRestaurantCount > 0
-                        ? ` · 술집 ${barRestaurantCount}곳`
-                        : ""}
-                    </p>
-                  )}
-              </div>
-
-              <button
-                type="button"
-                onClick={refreshRestaurants}
-                disabled={
-                  restaurantLoading ||
-                  restaurantRefreshCooldown > 0 ||
-                  !location
-                }
-                className="shrink-0 rounded-xl border border-orange-100 bg-orange-50 px-3 py-2 text-xs font-bold text-orange-600 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
-                title="현재 기준 위치에서 음식점을 다시 검색합니다."
-              >
-                {restaurantLoading
-                  ? "검색 중"
-                  : restaurantRefreshCooldown > 0
-                    ? `${restaurantRefreshCooldown}초`
-                    : "↻ 새로고침"}
-              </button>
+              {!restaurantLoading &&
+                sortedRestaurants.length > 0 && (
+                  <span className="text-xs text-gray-400">
+                    {mealRestaurantCount}곳
+                    {barRestaurantCount >
+                      0
+                      ? ` · 술집 ${barRestaurantCount}곳`
+                      : ""}
+                  </span>
+                )}
 
             </div>
 
@@ -4366,6 +4387,24 @@ export default function MapPage() {
                                 </span>
 
                               </div>
+
+                              {getMenuMatchConfidenceMeta(
+                                restaurant
+                              ) && (
+                                <div className="mt-2">
+                                  <span
+                                    className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] font-bold ${
+                                      getMenuMatchConfidenceMeta(
+                                        restaurant
+                                      )!.className
+                                    }`}
+                                  >
+                                    {getMenuMatchConfidenceMeta(
+                                      restaurant
+                                    )!.label}
+                                  </span>
+                                </div>
+                              )}
 
                             </div>
 

@@ -72,6 +72,27 @@ type SearchHit = {
   matchKind: MatchKind;
 };
 
+function getMatchConfidenceMeta(kind: MatchKind) {
+  if (kind === "exact") {
+    return {
+      label: "메뉴명 직접 검색",
+      className: "bg-emerald-100 text-emerald-700",
+    };
+  }
+
+  if (kind === "alias") {
+    return {
+      label: "유사 메뉴명 기준",
+      className: "bg-blue-100 text-blue-700",
+    };
+  }
+
+  return {
+    label: "넓은 계열 기준",
+    className: "bg-amber-100 text-amber-700",
+  };
+}
+
 function toRadians(value: number) {
   return (value * Math.PI) / 180;
 }
@@ -695,11 +716,17 @@ export default function ExplorationPanel() {
                               </span>
                             )}
 
-                            {matchKind === "related" && (
-                              <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-[10px] font-black text-gray-500">
-                                관련 계열 식당
-                              </span>
-                            )}
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-black ${
+                                getMatchConfidenceMeta(
+                                  matchKind
+                                ).className
+                              }`}
+                            >
+                              {getMatchConfidenceMeta(
+                                matchKind
+                              ).label}
+                            </span>
                           </div>
 
                           <h3 className="mt-2 text-base font-black text-gray-900">{menu.name}</h3>
@@ -731,6 +758,12 @@ export default function ExplorationPanel() {
                             📍 {formatDistance(distance)}
                           </span>
                         </div>
+
+                        {matchKind === "related" && (
+                          <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-[10px] leading-4 text-amber-700">
+                            넓은 메뉴 계열 검색으로 찾은 후보예요. 실제로 {menu.name}을 판매하는지는 네이버 메뉴판에서 한 번 확인해주세요.
+                          </p>
+                        )}
 
                         <a
                           href={buildNaverMapLink(place, menu.name)}
