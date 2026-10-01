@@ -1,23 +1,19 @@
-점메추 추천 피드백 가중치 안전장치 패치
+점메추 친구 요청 수락/거절 보강 패치
 
-적용 경로
-C:\project\project\lib\taste-feedback.ts
+덮어쓸 위치:
+C:\project\project
 
-변경 내용
-1. 좋아요 전체 영향량 최대 +2.0
-2. 싫어요 전체 영향량 최대 -1.5
-3. 같은 메뉴 재평가는 기존 UNIQUE(user_id, food_id) 구조를 그대로 사용해 누적되지 않고 최신 평가 1개만 반영
-4. 선호메뉴 화면에서 직접 선택한 메뉴가 피드백보다 우선
-5. 피드백이 서로 상쇄되어 벡터가 거의 0이 되는 경우 직접 선호만으로 fallback
+변경 파일:
+- app/friends/page.tsx
+- app/api/friends/[friendshipId]/accept/route.ts
+- app/api/friends/[friendshipId]/reject/route.ts
 
-예시
-좋아요 1개  = +0.85
-좋아요 2개  = +1.70
-좋아요 3개 이상 = 전체 합계 최대 +2.00
+변경 내용:
+1. 수락/거절 API route를 명시적으로 보강
+2. 받은 요청의 receiver_id 본인만 처리 가능
+3. PENDING 상태만 ACCEPTED / REJECTED로 변경
+4. 프론트에서 API가 404 HTML 등을 반환해도 조용히 실패하지 않고 오류 메시지 표시
+5. 처리 중 버튼 중복 클릭 방지 + "처리 중..." 표시
 
-싫어요 1개  = -0.65
-싫어요 2개  = -1.30
-싫어요 3개 이상 = 전체 합계 최대 -1.50
-
-적용 후
+적용 후:
 npm run build
